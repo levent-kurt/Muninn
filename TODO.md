@@ -15,10 +15,10 @@
 - [x] Add unified 429/CAPTCHA and block detection hooks across all parsers.
 
 ## Phase 3: Engine Manager & Circuit Breaker
-- [ ] Create `EngineState` and `EngineManager` classes in `app/engine_manager.py`.
-- [ ] Implement Round-Robin engine selection logic ignoring quarantined engines.
-- [ ] Implement quarantine escalation logic (30m quarantine on 1st error -> 12h on 2nd error).
-- [ ] Write unit tests for quarantine transitions.
+- [x] Create `EngineState` and `EngineManager` classes in `app/engine_manager.py`.
+- [x] Implement Round-Robin engine selection logic ignoring quarantined engines.
+- [x] Implement quarantine escalation logic (30m quarantine on 1st error -> 12h on 2nd error).
+- [x] Write unit tests for quarantine transitions.
 
 ## Phase 4: Queue, Caching & API Layer
 - [ ] Implement SQLite cache layer (`app/cache.py`) with query normalization and TTL.
