@@ -55,6 +55,21 @@ def test_parse_deduplicates_by_url() -> None:
     assert len(urls) == len(set(urls))
 
 
+def test_ddg_unwraps_redirect_urls() -> None:
+    live_style_html = """
+    <div class="results">
+      <div class="result">
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frealpython.com%2Fbeautiful-soup-web-scraper-python%2F&rut=abc">Real Python</a>
+        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frealpython.com%2Fbeautiful-soup-web-scraper-python%2F&rut=abc">Scrape with BeautifulSoup.</a>
+      </div>
+    </div>
+    """
+    results = DuckDuckGoParser.parse(live_style_html)
+    assert len(results) == 1
+    assert results[0].url == "https://realpython.com/beautiful-soup-web-scraper-python/"
+    assert results[0].snippet == "Scrape with BeautifulSoup."
+
+
 def test_detect_block_http_429() -> None:
     assert GoogleParser.detect_block("<html>ok</html>", status=429) == "429"
 

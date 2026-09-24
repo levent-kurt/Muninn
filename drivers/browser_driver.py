@@ -86,31 +86,40 @@ class BrowserDriver:
         """Navigate to ``url`` in a fresh page and return ``(html, http_status)``.
 
         The page is always closed before returning; the browser and context are
-        preserved for the next request.
+        preserved for the next request. A hard per-page time budget prevents a
+        misbehaving engine page from hanging the queue forever.
         """
         if not self._started or self._context is None:
             raise BrowserDriverError("browser driver is not started")
-        async with self._lock:
-            page: Page = await self._context.new_page()
-            try:
-                response = await page.goto(
-                    url,
-                    wait_until="domcontentloaded",
-                    timeout=self._settings.navigation_timeout_ms,
-                )
-                status = response.status if response is not None else None
-                if status is None or status < 400:
-                    # Give client-side rendered engines a beat to paint results.
-                    await page.wait_for_timeout(1500)
-                html: str = await page.content()
-                return html, status
-            except PWTimeoutError:
-                # Capture whatever DOM we have; callers run block detection on it.
-                logger.warning("navigation timeout for %s", url)
-                html = await page.content()
-                return html, None
-            except Exception as exc:  # pragma: no cover
-                logger.error("fetch failed for %s: %s", url, exc)
-                raise BrowserDriverError(f"fetch failed: {exc}") from exc
-            finally:
-                await page.close()
+        budget = max(30.0, self._settings.navigation_timeout_ms / 1000 + 15)
+
+        async def _fetch():
+            async with self._lock:
+                page: Page = await self._context.new_page()
+                try:
+                    response = await page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=self._settings.navigation_timeout_ms,
+                    )
+                    status = response.status if response is not None else None
+                    if status is None or status < 400:
+                        # Give client-side rendered engines a beat to paint results.
+                        await page.wait_for_timeout(1500)
+                    html: str = await page.content()
+                    return html, status
+                except PWTimeoutError:
+                    # Capture whatever DOM we have; callers run block detection on it.
+                    logger.warning("navigation timeout for %s", url)
+                    html = await page.content()
+                    return html, None
+                finally:
+                    await page.close()
+
+        try:
+            return await asyncio.wait_for(_fetch(), timeout=budget)
+        except asyncio.TimeoutError as exc:
+            raise BrowserDriverError(f"page fetch exceeded budget ({budget:.0f}s): {url}") from exc
+        except Exception as exc:  # pragma: no cover
+            logger.error("fetch failed for %s: %s", url, exc)
+            raise BrowserDriverError(f"fetch failed: {exc}") from exc

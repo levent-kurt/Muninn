@@ -28,7 +28,7 @@
   - [x] `GET /status`: Monitoring dashboard endpoint for engine statuses and queue metrics.
 
 ## Phase 5: Containerization & Integration Testing
-- [ ] Create `docker-compose.yml` service definition.
-- [ ] Test end-to-end flow with simulated batch search queries (100+ requests).
-- [ ] Benchmark memory footprint and ensure Chromium browser context is reused cleanly.
-- [ ] Write integration documentation and API usage examples.
+- [x] Create `docker-compose.yml` service definition.
+- [x] Test end-to-end flow with simulated batch search queries (100+ requests).
+- [x] Benchmark memory footprint and ensure Chromium browser context is reused cleanly.
+- [x] Write integration documentation and API usage examples.
