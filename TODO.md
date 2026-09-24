@@ -21,11 +21,11 @@
 - [x] Write unit tests for quarantine transitions.
 
 ## Phase 4: Queue, Caching & API Layer
-- [ ] Implement SQLite cache layer (`app/cache.py`) with query normalization and TTL.
-- [ ] Implement async FIFO task queue with randomized interval throttler (15–30s delay).
-- [ ] Build FastAPI routes:
-  - [ ] `GET /search`: Endpoint handling cache lookup, queue dispatch, and response formatting.
-  - [ ] `GET /status`: Monitoring dashboard endpoint for engine statuses and queue metrics.
+- [x] Implement SQLite cache layer (`app/cache.py`) with query normalization and TTL.
+- [x] Implement async FIFO task queue with randomized interval throttler (15–30s delay).
+- [x] Build FastAPI routes:
+  - [x] `GET /search`: Endpoint handling cache lookup, queue dispatch, and response formatting.
+  - [x] `GET /status`: Monitoring dashboard endpoint for engine statuses and queue metrics.
 
 ## Phase 5: Containerization & Integration Testing
 - [ ] Create `docker-compose.yml` service definition.
