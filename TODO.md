@@ -7,12 +7,12 @@
 - [x] Write initial `Dockerfile` installing Python and Chromium dependencies.
 
 ## Phase 2: Driver Implementation (Playwright Stealth)
-- [ ] Set up single persistent Chromium browser context manager (`drivers/browser_driver.py`).
-- [ ] Implement DOM parser & scraper for **Google Search**.
-- [ ] Implement DOM parser & scraper for **Bing Search**.
-- [ ] Implement DOM parser & scraper for **DuckDuckGo Search**.
-- [ ] Implement DOM parser & scraper for **Mojeek Search**.
-- [ ] Add unified 429/CAPTCHA and block detection hooks across all parsers.
+- [x] Set up single persistent Chromium browser context manager (`drivers/browser_driver.py`).
+- [x] Implement DOM parser & scraper for **Google Search**.
+- [x] Implement DOM parser & scraper for **Bing Search**.
+- [x] Implement DOM parser & scraper for **DuckDuckGo Search**.
+- [x] Implement DOM parser & scraper for **Mojeek Search**.
+- [x] Add unified 429/CAPTCHA and block detection hooks across all parsers.
 
 ## Phase 3: Engine Manager & Circuit Breaker
 - [ ] Create `EngineState` and `EngineManager` classes in `app/engine_manager.py`.
