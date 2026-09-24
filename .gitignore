@@ -1,0 +1,23 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Runtime data ---------------------------------------------------------
+data/*.db
+data/*.db-*
+data/screenshots/
+!data/.gitkeep
+
+# --- Editors / OS ---------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

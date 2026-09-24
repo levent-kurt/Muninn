@@ -1,0 +1,1 @@
+# Create the data directory so the SQLite cache volume has a mount point.
