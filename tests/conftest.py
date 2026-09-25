@@ -49,12 +49,12 @@ class FakeDriver:
             return "mojeek"
         return "unknown"
 
-    async def fetch_html(self, url: str) -> tuple[str, int]:
+    async def fetch_html(self, url: str, engine: str = "") -> tuple[str, int]:
         self.urls.append(url)
-        engine = self.engine_from_url(url)
-        if self.all_blocked or engine in self.block_engines:
-            return BLOCK_PAGES[engine], 200
-        return ENGINE_RESULTS_HTML[engine], 200
+        key = engine or self.engine_from_url(url)
+        if self.all_blocked or key in self.block_engines:
+            return BLOCK_PAGES[key], 200
+        return ENGINE_RESULTS_HTML[key], 200
 
 
 def make_test_settings(**overrides) -> Settings:

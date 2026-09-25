@@ -40,6 +40,9 @@ make check           # ruff + mypy + pytest, exactly what CI runs
 All three must pass. `make format` applies ruff's formatter; it is **not** a CI
 gate, so you only need to run it on the files you touch.
 
+The whole-pipeline load smoke test lives in `tests/test_batch_smoke.py` and runs
+with the rest of the suite.
+
 House rules the tooling cannot check for you:
 
 - **Keep the test suite offline and fast.** No test may touch the network, spawn

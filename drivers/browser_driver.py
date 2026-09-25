@@ -26,15 +26,19 @@ class BrowserDriverError(Exception):
 
 
 class BrowserDriver:
-    """Owns one persistent Chromium browser and BrowserContext with stealth."""
+    """Owns one persistent Chromium browser with a context per search engine."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._stealth_cm: Stealth | None = None
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
-        self._context: BrowserContext | None = None
+        # One BrowserContext per engine: contexts are cheap compared with
+        # launching a browser, and they keep cookies/localStorage/DOM state from
+        # leaking between sites.
+        self._contexts: dict[str, BrowserContext] = {}
         self._started = False
+        # Guards context creation only, never a navigation.
         self._lock = asyncio.Lock()
 
     # -- lifecycle ----------------------------------------------------------
@@ -45,7 +49,7 @@ class BrowserDriver:
         return self._started
 
     async def start(self) -> None:
-        """Launch the persistent browser/context and apply stealth hooks."""
+        """Launch the persistent browser and apply stealth hooks."""
         if self._started:
             return
         stealth = Stealth()
@@ -56,70 +60,94 @@ class BrowserDriver:
             headless=self._settings.headless,
             args=self._settings.browser_launch_args(),
         )
-        self._context = await self._browser.new_context(
-            user_agent=self._settings.user_agent,
-            locale=self._settings.locale,
-            viewport={"width": 1280, "height": 900},
-        )
         self._started = True
-        logger.info("Persistent Chromium context started (stealth applied)")
+        logger.info("Persistent Chromium started (stealth applied)")
+
+    async def _context_for(self, engine: str) -> BrowserContext:
+        """Return this engine's context, creating it on first use.
+
+        One context per engine, reused for the life of the browser. Sharing a
+        single context across engines would let cookies, localStorage and DOM
+        state bleed from Google into Bing, which is both a correctness problem
+        and a bot-detection signal. Contexts are cheap relative to launching a
+        browser, so this keeps the "no process churn" property while isolating
+        the sites.
+        """
+        assert self._browser is not None  # guaranteed by is_started / start()
+        async with self._lock:
+            context = self._contexts.get(engine)
+            if context is None:
+                context = await self._browser.new_context(
+                    user_agent=self._settings.user_agent,
+                    locale=self._settings.locale,
+                    viewport={"width": 1280, "height": 900},
+                )
+                self._contexts[engine] = context
+                logger.debug("created browser context for engine=%s", engine)
+            return context
 
     async def stop(self) -> None:
-        """Tear down the browser and playwright session."""
-        if self._context is not None:
+        """Tear down every context, the browser, and the playwright session."""
+        for engine, context in list(self._contexts.items()):
             try:
-                await self._context.close()
+                await context.close()
             except Exception:  # pragma: no cover - best effort shutdown
-                logger.debug("error closing context", exc_info=True)
+                logger.debug("error closing context for %s", engine, exc_info=True)
+        self._contexts.clear()
         if self._browser is not None:
             try:
                 await self._browser.close()
             except Exception:  # pragma: no cover
                 logger.debug("error closing browser", exc_info=True)
+            self._browser = None
         if self._stealth_cm is not None and self._pw is not None:
             try:
                 await self._stealth_cm.__aexit__(None, None, None)
             except Exception:  # pragma: no cover
                 logger.debug("error closing playwright", exc_info=True)
+        self._stealth_cm = None
+        self._pw = None
+        self._browser = None
         self._started = False
-        logger.info("Persistent Chromium context stopped")
+        logger.info("Persistent Chromium stopped (all engine contexts closed)")
 
     # -- request helpers ----------------------------------------------------
 
-    async def fetch_html(self, url: str) -> tuple[str | None, int | None]:
+    async def fetch_html(self, url: str, engine: str = "") -> tuple[str | None, int | None]:
         """Navigate to ``url`` in a fresh page and return ``(html, http_status)``.
 
-        The page is always closed before returning; the browser and context are
-        preserved for the next request. A hard per-page time budget prevents a
-        misbehaving engine page from hanging the queue forever.
+        ``engine`` selects which per-engine context the page is opened in, so
+        state never crosses sites. The page is always closed before returning;
+        the browser and contexts are preserved for the next request. A hard
+        per-page time budget prevents a misbehaving engine page from hanging the
+        queue forever.
         """
-        if not self._started or self._context is None:
+        if not self._started or self._browser is None:
             raise BrowserDriverError("browser driver is not started")
-        context = self._context
+        context = await self._context_for(engine or url)
         budget = max(30.0, self._settings.navigation_timeout_ms / 1000 + 15)
 
         async def _fetch() -> tuple[str | None, int | None]:
-            async with self._lock:
-                page: Page = await context.new_page()
-                try:
-                    response = await page.goto(
-                        url,
-                        wait_until="domcontentloaded",
-                        timeout=self._settings.navigation_timeout_ms,
-                    )
-                    status = response.status if response is not None else None
-                    if status is None or status < 400:
-                        # Give client-side rendered engines a beat to paint results.
-                        await page.wait_for_timeout(1500)
-                    html: str = await page.content()
-                    return html, status
-                except PWTimeoutError:
-                    # Capture whatever DOM we have; callers run block detection on it.
-                    logger.warning("navigation timeout for %s", url)
-                    html = await page.content()
-                    return html, None
-                finally:
-                    await page.close()
+            page: Page = await context.new_page()
+            try:
+                response = await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self._settings.navigation_timeout_ms,
+                )
+                status = response.status if response is not None else None
+                if status is None or status < 400:
+                    # Give client-side rendered engines a beat to paint results.
+                    await page.wait_for_timeout(1500)
+                html: str = await page.content()
+                return html, status
+            except PWTimeoutError:
+                # Capture whatever DOM we have; callers run block detection on it.
+                logger.warning("navigation timeout for %s", url)
+                html = await page.content()
+                return html, None
+            finally:
+                await page.close()
 
         try:
             return await asyncio.wait_for(_fetch(), timeout=budget)

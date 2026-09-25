@@ -300,8 +300,9 @@ engine manager rotates engines round-robin; a 429 or CAPTCHA quarantines that
 engine (30 min, then 12 h for consecutive failures) and the job retries on the
 next active one. Quarantine state is written to SQLite, so restarting the
 service does not immediately re-hammer an engine that just blocked you. All
-four engines share one persistent Chromium context; each request gets a fresh
-page that is closed afterwards.
+all four engines share one persistent Chromium, but each engine gets its own browser
+context, so cookies and DOM state never cross sites; every request opens a
+fresh page that is closed afterwards.
 
 **Scrape.** For each target:
 
@@ -405,8 +406,8 @@ The suite is **offline and fast** (~160 tests, a couple of seconds): no test
 touches the network or launches a real browser.
 
 ```bash
-# 100+ simulated requests through the full pipeline (fake driver, no network)
-python scripts/batch_smoke.py
+# 100+ simulated searches through the whole pipeline (fake driver, no network)
+pytest tests/test_batch_smoke.py
 
 # OPT-IN live check against real engines (adds low-volume real traffic)
 LIVE=1 python scripts/live_probe.py "python web scraping"
@@ -429,7 +430,7 @@ browser_pool/             stealth-browser worker process + supervising manager
 ops/                      politeness, scrape cache, SSRF guard, robots, rate limit
 services/                 scrape pipeline orchestrator
 routers/                  /scrape and /health FastAPI routers
-scripts/                  offline batch smoke test and opt-in live probe
+scripts/                  opt-in live probe against real engines
 tests/                    unit + API integration tests
 data/                     SQLite cache and worker log (gitignored)
 Dockerfile                Python + Chromium runtime image (non-root)

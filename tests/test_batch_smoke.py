@@ -1,23 +1,20 @@
-#!/usr/bin/env python3
-"""End-to-end smoke test: 100+ simulated search requests through the API.
+"""Whole-pipeline load smoke test: 100+ searches through the real app.
 
-Runs the full pipeline (FastAPI -> queue -> throttler -> engine manager ->
-driver stub -> parsers -> cache) with a deterministic fake driver, so:
-  * 100 requests (25 unique queries x 4) complete successfully;
-  * the second wave is served from cache (no extra outbound calls);
-  * Round-Robin distributes the first wave across all four engines;
-  * quarantine + 503 behaviour works when engines get blocked.
+This used to be ``scripts/batch_smoke.py``, but it imported its fakes from
+``tests.conftest`` - so a script depended on the test package, and the Docker
+image (which excludes ``tests/``) could not run it at all. It is a test, so it
+lives here now, and CI runs it on every push.
 
-Usage:  python scripts/batch_smoke.py
+Covers, with a simulated driver and no network:
+  * 25 unique queries complete and are NOT served from cache;
+  * the second wave of identical queries is served from cache with zero
+    additional outbound calls;
+  * round-robin rotation exercises every engine;
+  * a blocked engine is quarantined and skipped, and when every engine is
+    blocked the API answers 503.
 """
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
-
-# Allow running directly:  python scripts/batch_smoke.py
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 
@@ -30,11 +27,11 @@ REPEAT_EACH = 4
 TOTAL = UNIQUE_QUERIES * REPEAT_EACH
 
 
-def main() -> int:
+def test_batch_smoke_throughput_and_cache() -> None:
     fake = FakeDriver()
     app = create_app(settings=make_test_settings(), driver_factory=lambda s: fake)
-
     failures: list[str] = []
+
     with TestClient(app) as client:
         # --- wave 1: 25 unique queries (every engine must be exercised) -----
         wave1_engines: dict[str, int] = {}
@@ -61,7 +58,20 @@ def main() -> int:
             if r.json()["cached"]:
                 cache_hits += 1
 
-        # --- circuit breaker probe -------------------------------------------
+        # --- cache must have absorbed the second wave entirely --------------
+        if cache_hits != TOTAL - UNIQUE_QUERIES:
+            failures.append(
+                f"expected {TOTAL - UNIQUE_QUERIES} cache hits, got {cache_hits}"
+            )
+        if fake.url_count != calls_after_wave1:
+            failures.append("wave 2 issued outbound calls despite cache hits")
+
+        # --- round-robin covered every engine -------------------------------
+        uncovered = [e for e in SUPPORTED_ENGINES if wave1_engines.get(e, 0) == 0]
+        if uncovered:
+            failures.append(f"engines never exercised: {uncovered}")
+
+        # --- circuit breaker ------------------------------------------------
         fake.block_engines = {"google"}
         if client.get("/search", params={"q": "block probe"}).json()["engine_used"] == "google":
             failures.append("google not excluded after block")
@@ -69,30 +79,13 @@ def main() -> int:
         fake.all_blocked = True
         if client.get("/search", params={"q": "all blocked"}).status_code != 503:
             failures.append("expected 503 when all engines are quarantined")
+        fake.all_blocked = False
+
         status = client.get("/status").json()
         if all(e["status"] != "quarantined" for e in status["engines"].values()):
             failures.append("expected quarantine states in /status")
         final_status = client.get("/status").json()
+        if final_status["queue_depth"] != 0:
+            failures.append("queue did not drain")
 
-    # ------------------------------------------------------------------ report
-    covered = [e for e in SUPPORTED_ENGINES if wave1_engines.get(e, 0) > 0]
-    print("=" * 56)
-    print("Muninn batch smoke (simulated driver)")
-    print("=" * 56)
-    print(f"requests sent      : {TOTAL} ({UNIQUE_QUERIES} unique x {REPEAT_EACH})")
-    print(f"cache hits (wave2) : {cache_hits}/{TOTAL - UNIQUE_QUERIES}")
-    print(f"outbound calls     : {calls_after_wave1} for wave 1 (cached wave 2 adds 0)")
-    print(f"engine rotation    : {dict(sorted(wave1_engines.items()))}")
-    print(f"engines covered    : {sorted(covered)}")
-    print(f"queue drained      : {final_status['queue_depth'] == 0}")
-    print(f"cache entries      : {final_status['cached_queries_count']}")
-
-    ok = not failures
-    print("RESULT:", "PASS" if ok else "FAIL")
-    for f in failures:
-        print("  -", f)
-    return 0 if ok else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert not failures, "batch smoke failures:\n  " + "\n  ".join(failures)

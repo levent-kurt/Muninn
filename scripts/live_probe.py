@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import resource
 import sys
 from pathlib import Path
 
@@ -33,7 +32,16 @@ from drivers.browser_driver import BrowserDriver
 
 
 def rss_mb() -> float:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0  # macOS = KB
+    """Peak resident memory in MiB, or 0.0 where the platform cannot report it.
+
+    ``resource`` is POSIX-only; importing it unconditionally would make this
+    script fail on Windows with an opaque ImportError.
+    """
+    try:
+        import resource
+    except ImportError:
+        return 0.0
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0  # *nix = KB
 
 
 async def run(query: str) -> int:

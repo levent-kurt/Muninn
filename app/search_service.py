@@ -193,7 +193,7 @@ class SearchService:
             parser = get_parser(engine)
             url = parser.search_url(job.query, job.max_results)
             try:
-                html, status = await self._driver.fetch_html(url)
+                html, status = await self._driver.fetch_html(url, engine)
                 if html is None:
                     # Navigation failed with nothing to parse - treat it exactly
                     # like a block so the engine is quarantined and we rotate.
