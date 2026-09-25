@@ -158,16 +158,16 @@
 
 ## Phase 6: Documentation & Final Cleanup
 
-* [ ] **Documentation (`README.md`)**
-* [ ] Add `/scrape` endpoint API documentation:
+* [x] **Documentation (`README.md`)**
+* [x] Add `/scrape` endpoint API documentation:
 * Request parameters (`url`, `render`, `max_text`).
 * Response JSON structure fields (`title`, `text`, `links`, `block_suspected`, etc.).
 
 
-* [ ] Add cURL and Python (`requests`/`httpx`) code snippets demonstrating `/scrape` usage.
-* [ ] Document configuration environment variables (`BROWSER_IDLE_TIMEOUT`, `PER_HOST_DELAY_SECONDS`, `SCRAPE_CACHE_TTL`).
+* [x] Add cURL and Python (`requests`/`httpx`) code snippets demonstrating `/scrape` usage.
+* [x] Document configuration environment variables (`BROWSER_IDLE_TIMEOUT`, `PER_HOST_DELAY_SECONDS`, `SCRAPE_CACHE_TTL`).
 
 
-* [ ] **Final Repository Verification**
-* [ ] Run full test suite to ensure all endpoints (`/search`, `/scrape`, `/health`) pass cleanly.
-* [ ] Stage changes and create final release commit (`git commit -m "docs: update README with /scrape usage and configuration"`).
+* [x] **Final Repository Verification**
+* [x] Run full test suite to ensure all endpoints (`/search`, `/scrape`, `/health`) pass cleanly.
+* [x] Stage changes and create final release commit (`git commit -m "docs: update README with /scrape usage and configuration"`).
