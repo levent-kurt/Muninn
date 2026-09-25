@@ -43,20 +43,20 @@
 
 ## Phase 2: Core Extractors & Fast-Path Pipeline
 
-* [ ] **Sitemap Parser (`parsers/sitemap.py`)**
-* [ ] Detect `sitemap.xml` URL extensions or `text/xml` / `application/xml` headers.
-* [ ] Parse `` elements from XML structure.
-* [ ] Map `` entries into `LinkItem` objects and return instantly, bypassing rendering and text extraction.
+* [x] **Sitemap Parser (`parsers/sitemap.py`)**
+* [x] Detect `sitemap.xml` URL extensions or `text/xml` / `application/xml` headers.
+* [x] Parse `` elements from XML structure.
+* [x] Map `` entries into `LinkItem` objects and return instantly, bypassing rendering and text extraction.
 
 
-* [ ] **Fast-Path Fetcher (`fetchers/fast_path.py`)**
-* [ ] Implement plain HTTP fetch using `httpx` with realistic browser `User-Agent` and `Accept-Language` headers.
-* [ ] Track HTTP redirects to capture `final_url`.
+* [x] **Fast-Path Fetcher (`fetchers/fast_path.py`)**
+* [x] Implement plain HTTP fetch using `httpx` with realistic browser `User-Agent` and `Accept-Language` headers.
+* [x] Track HTTP redirects to capture `final_url`.
 
 
-* [ ] **Content Parsers (`parsers/content.py`)**
-* [ ] Implement `trafilatura.extract(html)` for clean main-text extraction, enforcing `max_text` character cap.
-* [ ] Implement BeautifulSoup (`lxml`) parser to extract:
+* [x] **Content Parsers (`parsers/content.py`)**
+* [x] Implement `trafilatura.extract(html)` for clean main-text extraction, enforcing `max_text` character cap.
+* [x] Implement BeautifulSoup (`lxml`) parser to extract:
 * `title` tag content.
 * `` content.
 * Hyperlinks (`` tags): Resolve relative URLs to absolute using `final_url`, extract `anchor_text`, compute `same_domain` boolean flag, deduplicate URLs, and cap output to 60 items.
@@ -64,8 +64,8 @@
 
 
 
-* [ ] **Block & Fallback Detection Engine (`parsers/block_detector.py`)**
-* [ ] Flag `block_suspected = True` if:
+* [x] **Block & Fallback Detection Engine (`parsers/block_detector.py`)**
+* [x] Flag `block_suspected = True` if:
 * Upstream status code is `403`, `429`, or `503`.
 * HTML body contains Cloudflare/Challenge markers (`Just a moment...`, `cf-chl`, `g-recaptcha`, `captcha-delivery`).
 * Extracted text is `< 200` characters while raw HTML size is large (> 20 KB).
@@ -74,7 +74,7 @@
 
 
 
-* [ ] Stage changes and commit Phase 2 (`git commit -m "feat(scrape): complete Phase 2 - fast path and extractors"`).
+* [x] Stage changes and commit Phase 2 (`git commit -m "feat(scrape): complete Phase 2 - fast path and extractors"`).
 
 ---
 
