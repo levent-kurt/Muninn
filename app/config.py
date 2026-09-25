@@ -106,6 +106,7 @@ class Settings:
     scrape_worker_port: int = field(default_factory=lambda: _env_int("SCRAPE_WORKER_PORT", 8_765))
     scrape_worker_url: str = field(default_factory=lambda: os.environ.get("SCRAPE_WORKER_URL", ""))
     scrape_worker_startup_timeout: float = field(default_factory=lambda: _env_float("SCRAPE_WORKER_STARTUP_TIMEOUT", 30.0))
+    scrape_worker_log_file: str = field(default_factory=lambda: os.environ.get("SCRAPE_WORKER_LOG_FILE", "data/scrape-worker.log"))
 
     # --- Service ------------------------------------------------------------
     host: str = field(default_factory=lambda: os.environ.get("HOST", "0.0.0.0"))

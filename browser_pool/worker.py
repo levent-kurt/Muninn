@@ -24,6 +24,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import re
+import signal
+import subprocess
 import time
 from contextlib import asynccontextmanager
 
@@ -180,24 +184,155 @@ class BrowserController:
             ):
                 logger.info("browser idle for %.0fs -> shutting down",
                             self.idle_seconds)
+                # In subprocess mode this may exit the whole process (its own
+                # deterministic idle-shutdown, see _shutdown_browser).
                 await self._shutdown_browser()
 
     async def _shutdown_browser(self) -> None:
+        # In subprocess mode we snapshot our whole process tree (node driver +
+        # every Chromium process, incl. renderers) BEFORE teardown: Chromium
+        # detaches its browser into its own process group and graceful close
+        # can orphan stray renderers, so neither killpg nor a post-close pid
+        # walk can reach them. The snapshot records pid, process group and the
+        # browser's --user-data-dir, so the reaper can also kill processes born
+        # DURING/AFTER teardown (they inherit the browser's group/profile) that
+        # would otherwise outlive the worker.
+        tree, profiles = (
+            _tree_snapshot(os.getpid())
+            if (
+                self._settings.scrape_worker_mode == "subprocess"
+                and os.getpgid(os.getpid()) == os.getpid()  # we are our group leader
+            )
+            else ([], set())
+        )
         async with self._lock:
             if self._browser is not None:
                 try:
                     await self._browser.close()
-                except Exception:  # pragma: no cover - best effort
-                    logger.debug("error closing browser", exc_info=True)
+                except Exception:
+                    logger.warning("error closing browser", exc_info=True)
             if self._stealth_cm is not None and self._pw is not None:
                 try:
                     await self._stealth_cm.__aexit__(None, None, None)
-                except Exception:  # pragma: no cover
-                    logger.debug("error closing playwright", exc_info=True)
+                except Exception:
+                    logger.warning("error closing playwright", exc_info=True)
             self._browser = None
             self._pw = None
             self._stealth_cm = None
             logger.info("stealth Chromium shut down")
+
+        # Deterministic idle exit for subprocess mode. uvicorn's SIGTERM handler
+        # is NOT reliably installed when this worker is spawned by the API via
+        # asyncio.create_subprocess_exec (observed: the worker dies with the
+        # default disposition, returncode -15), so self-signals can kill us
+        # mid-teardown and orphan the playwright node driver / Chromium.
+        # Instead: best-effort graceful close (above), then:
+        #   1. SIGTERM the whole process group (the worker is its group leader
+        #      thanks to main(): setpgid(0, 0)) so the node driver closes
+        #      cleanly;
+        #   2. fork a detached "reaper" that leaves the group (setsid) and ~1s
+        #      later SIGKILLs: every pid captured in the snapshot, every process
+        #      group captured in the snapshot (catches anything spawned into the
+        #      browser's group during teardown), and every process still using
+        #      the browser's --user-data-dir (catches anything born late, even
+        #      in its own new group);
+        #   3. exit cleanly with code 0 (the manager treats that as "lazy").
+        # The reaper is a fresh process that never touches the event loop, so
+        # forking from the single-threaded loop here is safe.
+        if (
+            self._settings.scrape_worker_mode == "subprocess"
+            and os.getpgid(os.getpid()) == os.getpid()
+        ):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)  # survive the group signal
+            try:
+                os.killpg(os.getpid(), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                reaper = os.fork()
+            except OSError:  # pragma: no cover - fork unavailable
+                reaper = -1
+            if reaper == 0:  # child: detached reaper
+                try:
+                    os.setsid()  # leave the worker's group so our killpg is safe
+                except OSError:  # pragma: no cover
+                    pass
+                time.sleep(1.0)  # let the graceful close finish first
+                for pid, _pgid in tree:
+                    if pid > 0:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                for _pid, pgid in tree:
+                    if pgid > 0:
+                        try:
+                            os.killpg(pgid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                for profile in profiles:
+                    try:
+                        out = subprocess.run(
+                            ["pgrep", "-f", profile],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        ).stdout
+                    except (OSError, subprocess.SubprocessError, TimeoutError):  # pragma: no cover
+                        continue
+                    for token in out.split():
+                        try:
+                            os.kill(int(token), signal.SIGKILL)
+                        except (ProcessLookupError, ValueError):
+                            pass
+                os._exit(0)
+            logger.info("subprocess worker idle -> exiting (code 0)")
+            os._exit(0)
+
+
+def _tree_snapshot(root: int) -> tuple[list[tuple[int, int]], set[str]]:
+    """(pid, pgid) pairs + ``--user-data-dir`` values for every descendant.
+
+    Walks by PARENTAGE (recursive ``pgrep -P``) so it works even though
+    Chromium detaches its browser into its own process group. Must run before
+    teardown: graceful close dismantles the parent/child links.
+    """
+    pairs: list[tuple[int, int]] = []
+    profiles: set[str] = set()
+    try:
+        out = subprocess.run(
+            ["pgrep", "-P", str(root)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError, TimeoutError):  # pragma: no cover
+        return pairs, profiles
+    for token in out.split():
+        try:
+            pid = int(token)
+        except ValueError:
+            continue
+        try:
+            pairs.append((pid, os.getpgid(pid)))
+        except ProcessLookupError:
+            pairs.append((pid, 0))
+        try:
+            cmd = subprocess.run(
+                ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout
+        except (OSError, subprocess.SubprocessError, TimeoutError):  # pragma: no cover
+            cmd = ""
+        match = re.search(r"--user-data-dir=(\S+)", cmd)
+        if match:
+            profiles.add(match.group(1))
+        children, child_profiles = _tree_snapshot(pid)
+        pairs.extend(children)
+        profiles.update(child_profiles)
+    return pairs, profiles
 
 
 def create_app(
@@ -241,6 +376,30 @@ def create_app(
     return app
 
 
+def _configure_logging(log_level: str, log_file: str) -> None:
+    """Persist the worker's own logs to a file.
+
+    ``uvicorn.run`` configures logging for its own loggers; the ``scrape-worker``
+    logger otherwise has no visible sink (its output is invisible - or, when the
+    manager pipes stderr, unread). Logging to a file makes the worker's idle
+    shutdown / teardown sequence diagnosable without touching uvicorn's setup.
+    """
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logger.setLevel(level)
+    logger.propagate = False  # avoid duplicating through uvicorn's root config
+    try:
+        parent = os.path.dirname(log_file) or "."
+        os.makedirs(parent, exist_ok=True)
+        handler: logging.Handler = logging.FileHandler(log_file)
+        logger.info("worker log -> %s", log_file)
+    except OSError:
+        handler = logging.StreamHandler()
+    handler.setLevel(level)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="StealthSearch scrape worker")
     parser.add_argument("--host", default=None)
@@ -249,6 +408,15 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     settings = get_settings()
+    if settings.scrape_worker_mode == "subprocess":
+        # Become our own process-group leader so the idle shutdown can signal
+        # the whole tree (node driver + Chromium) in one killpg instead of
+        # racing per-process teardown. No-op if already a group leader.
+        try:
+            os.setpgid(0, 0)
+        except OSError:  # pragma: no cover - already a group/session leader
+            pass
+    _configure_logging(args.log_level, settings.scrape_worker_log_file)
     host = args.host or settings.scrape_worker_host
     port = args.port or settings.scrape_worker_port
     uvicorn.run(create_app(), host=host, port=port, log_level=args.log_level)

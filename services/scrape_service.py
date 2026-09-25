@@ -61,8 +61,9 @@ class ScrapeService:
             self._settings.default_max_text,
         )
         max_links = self._settings.max_links_cap
+        render_flag = 1 if render else 0
 
-        hit = await self._cache.get(url)
+        hit = await self._cache.get(url, render_flag)
         if hit is not None:
             return hit
 
@@ -82,7 +83,7 @@ class ScrapeService:
                     rendered=False,
                     block_suspected=False,
                 )
-                await self._cache.set(response)
+                await self._cache.set(response, render_flag)
                 return response
 
             decision = block_detector.quick_block(
@@ -91,7 +92,7 @@ class ScrapeService:
                 render_requested=(render == 1),
             )
             if decision.blocked:
-                return await self._escalate(url, fast, max_text, max_links)
+                return await self._escalate(url, fast, max_text, max_links, render_flag)
 
             content = extract_content(
                 fast.html, fast.final_url, max_text, max_links
@@ -103,7 +104,7 @@ class ScrapeService:
                 self._settings.text_min_char_threshold,
             )
             if thin.blocked:
-                return await self._escalate(url, fast, max_text, max_links)
+                return await self._escalate(url, fast, max_text, max_links, render_flag)
 
             response = self._build(
                 url,
@@ -115,7 +116,7 @@ class ScrapeService:
                 rendered=False,
                 block_suspected=False,
             )
-            await self._cache.set(response)
+            await self._cache.set(response, render_flag)
             return response
 
     # -- internals --------------------------------------------------------------
@@ -126,6 +127,7 @@ class ScrapeService:
         fast: FastPathResult,
         max_text: int,
         max_links: int,
+        render_flag: int,
     ) -> ScrapeResponse:
         """Render the page in the stealth browser pool and re-evaluate it."""
         outcome: RenderOutcome = await self._pool.render(url)
@@ -157,7 +159,7 @@ class ScrapeService:
             final_url=final_url,
             status_code=status,
         )
-        await self._cache.set(response)
+        await self._cache.set(response, render_flag)
         return response
 
     def _build(

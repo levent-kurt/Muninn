@@ -1,9 +1,11 @@
 """TTL cache for completed :class:`~schemas.scrape.ScrapeResponse` objects.
 
-Results are keyed by the *requested* URL (fragment-stripped). On a hit the
-stored response is deep-copied so callers can never mutate the cached entry,
-with ``cached=True`` and an accurate ``age_seconds`` populated. Expired
-entries are dropped lazily on access; ``size()`` reports surviving entries.
+Results are keyed by the *requested* URL (fragment-stripped) plus the render
+flag, so an explicit ``render=1`` call is never served from a fast-path cache
+entry and vice-versa. On a hit the stored response is deep-copied so callers
+can never mutate the cached entry, with ``cached=True`` and an accurate
+``age_seconds`` populated. Expired entries are dropped lazily on access;
+``size()`` reports surviving entries.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from schemas.scrape import ScrapeResponse
 
 
 class ScrapeCache:
-    """In-memory, async-safe TTL cache keyed by URL."""
+    """In-memory, async-safe TTL cache keyed by URL + render flag."""
 
     def __init__(self, ttl_seconds: int = 3_600) -> None:
         self._ttl = ttl_seconds
@@ -25,11 +27,11 @@ class ScrapeCache:
         self._lock = asyncio.Lock()
 
     @staticmethod
-    def _key(url: str) -> str:
-        return urldefrag(url.strip()).url
+    def _key(url: str, render: int = 0) -> str:
+        return f"render={1 if render else 0}:{urldefrag(url.strip()).url}"
 
-    async def get(self, url: str) -> ScrapeResponse | None:
-        key = self._key(url)
+    async def get(self, url: str, render: int = 0) -> ScrapeResponse | None:
+        key = self._key(url, render)
         async with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -44,8 +46,8 @@ class ScrapeCache:
             fresh.age_seconds = int(age)
             return fresh
 
-    async def set(self, response: ScrapeResponse) -> None:
-        key = self._key(response.url)
+    async def set(self, response: ScrapeResponse, render: int = 0) -> None:
+        key = self._key(response.url, render)
         async with self._lock:
             self._entries[key] = (time.monotonic(), response)
 

@@ -207,6 +207,20 @@ async def test_scrape_render_flag_forces_browser() -> None:
     assert pool.calls == [CLEAN_PAGE_URL]
 
 
+async def test_scrape_render_not_served_from_fast_path_cache() -> None:
+    fetcher = FakeFetcher({CLEAN_PAGE_URL: _fast(CLEAN_PAGE_URL, CLEAN_PAGE_HTML)})
+    pool = FakePool(outcome=RenderOutcome(html=RENDERED_HTML, final_url=CLEAN_PAGE_URL, status=200, elapsed_ms=4))
+    service = _service(fetcher, pool)
+
+    fast = await service.scrape(CLEAN_PAGE_URL, render=0)
+    assert fast.rendered is False
+
+    rendered = await service.scrape(CLEAN_PAGE_URL, render=1)
+    assert rendered.rendered is True
+    assert rendered.cached is False  # fast-path cache entry must not leak into render=1
+    assert pool.calls == [CLEAN_PAGE_URL]
+
+
 async def test_scrape_rendered_page_still_blocked() -> None:
     fetcher = FakeFetcher({CLEAN_PAGE_URL: _fast(CLEAN_PAGE_URL, CHALLENGE_HTML)})
     pool = FakePool(outcome=RenderOutcome(html=CHALLENGE_HTML, final_url=CLEAN_PAGE_URL, status=200, elapsed_ms=3))

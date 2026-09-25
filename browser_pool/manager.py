@@ -141,8 +141,13 @@ class BrowserPoolManager:
             return
         if self.mode == "subprocess":
             if self._process is not None and self._process.returncode is not None:
-                logger.warning("worker died (exit %s) - respawning", self._process.returncode)
-                self._process = None
+                if self._process.returncode == 0:
+                    # Clean idle exit - just forget it; lazy-stop state.
+                    self._process = None
+                else:
+                    logger.warning("worker died (exit %s) - respawning",
+                                   self._process.returncode)
+                    self._process = None
             await self._spawn_worker()
         await self._wait_until_ready()
 
@@ -157,13 +162,16 @@ class BrowserPoolManager:
             "--port",
             str(port),
             "--log-level",
-            "warning",
+            "info",
         ]
+        # Worker stdio is discarded: its own diagnostics go to its log file
+        # (SCRAPE_WORKER_LOG_FILE). Piping would let an unread pipe fill up and
+        # block the worker's stderr writes over a long session.
         self._process = await asyncio.create_subprocess_exec(
             *cmd,
             env=os.environ.copy(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         logger.info("scrape worker spawned (pid=%s) on %s", self._process.pid, self.worker_url)
 
@@ -184,16 +192,24 @@ class BrowserPoolManager:
                 backoff = min(backoff * 1.5, 1.5)
         raise BrowserPoolUnavailable(f"scrape worker not ready at {self.worker_url}")
 
-    async def _terminate_worker(self) -> None:
+    async def _terminate_worker(self, grace: float = 10.0) -> None:
         proc, self._process = self._process, None
         if proc is None or proc.returncode is not None:
             return
         proc.terminate()
         try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
+            # Give the worker time to run its graceful shutdown (uvicorn
+            # lifespan stop closes Chromium, so no orphaned browser processes).
+            await asyncio.wait_for(proc.wait(), timeout=grace)
         except asyncio.TimeoutError:
-            proc.kill()
+            logger.warning("worker did not stop within %.0fs - killing", grace)
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return
             await proc.wait()
+        except ProcessLookupError:  # pragma: no cover - race with exit
+            return
 
     # -- render ---------------------------------------------------------------
 
@@ -265,6 +281,9 @@ class BrowserPoolManager:
                 # Lazy-start: nothing running yet is the healthy default state.
                 return PoolStatus(ok=True, mode=self.mode, detail="lazy (not started)")
             if self._process.returncode is not None:
+                if self._process.returncode == 0:
+                    return PoolStatus(ok=True, mode=self.mode,
+                                      detail="lazy (worker idle-exited)")
                 return PoolStatus(
                     ok=False,
                     mode=self.mode,
@@ -289,14 +308,19 @@ class BrowserPoolManager:
             return PoolStatus(ok=False, mode=self.mode, detail=f"unreachable: {exc}")
 
     async def _idle_watchdog(self) -> None:
+        # Safety net only: the worker self-exits cleanly (closing its browser
+        # first) at ~1x BROWSER_IDLE_TIMEOUT, so the manager only force-stops
+        # stragglers after 2x. This avoids racing the worker's own shutdown,
+        # which used to orphan Chromium child processes mid-close.
+        idle_cutoff = self._settings.browser_idle_timeout * 2
         while True:
             await asyncio.sleep(self._poll_interval)
             if self.mode != "subprocess" or not self._process_alive():
                 continue
             if (
                 self._active_jobs == 0
-                and time.monotonic() - self._last_use > self._settings.browser_idle_timeout
+                and time.monotonic() - self._last_use > idle_cutoff
             ):
-                logger.info("pool idle for %.0fs -> stopping worker",
-                            self._settings.browser_idle_timeout)
+                logger.info("pool idle for %.0fs -> stopping straggler worker",
+                            idle_cutoff)
                 await self._terminate_worker()
