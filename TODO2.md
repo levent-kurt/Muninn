@@ -102,27 +102,27 @@
 
 ## Phase 4: Server-Side Operations & Pipeline Orchestration
 
-* [ ] **Per-Host Politeness Manager (`ops/politeness.py`)**
-* [ ] Build in-memory domain queue with host-level locking.
-* [ ] Enforce a mandatory delay (e.g., 2 seconds) between consecutive requests targeting the same hostname.
+* [x] **Per-Host Politeness Manager (`ops/politeness.py`)**
+* [x] Build in-memory domain queue with host-level locking.
+* [x] Enforce a mandatory delay (e.g., 2 seconds) between consecutive requests targeting the same hostname.
 
 
-* [ ] **TTL Caching Layer (`ops/cache.py`)**
-* [ ] Store completed `ScrapeResponse` objects by URL key.
-* [ ] Populate `cached=True` and calculate `age_seconds` for cache hits.
+* [x] **TTL Caching Layer (`ops/cache.py`)**
+* [x] Store completed `ScrapeResponse` objects by URL key.
+* [x] Populate `cached=True` and calculate `age_seconds` for cache hits.
 
 
-* [ ] **Scrape Pipeline Orchestrator (`services/scrape_service.py`)**
-* [ ] Check cache $\rightarrow$ If hit, return cached result.
-* [ ] Check if URL is a Sitemap $\rightarrow$ If yes, parse `` and return.
-* [ ] Acquire politeness slot for host.
-* [ ] Attempt Fast-Path fetch.
-* [ ] Evaluate `block_detector`. If clean and `render=0`, extract text/links and return.
-* [ ] If blocked or `render=1`, escalate request to Stealth Browser Pool.
-* [ ] Save result to cache and return response.
+* [x] **Scrape Pipeline Orchestrator (`services/scrape_service.py`)**
+* [x] Check cache $\rightarrow$ If hit, return cached result.
+* [x] Check if URL is a Sitemap $\rightarrow$ If yes, parse `` and return.
+* [x] Acquire politeness slot for host.
+* [x] Attempt Fast-Path fetch.
+* [x] Evaluate `block_detector`. If clean and `render=0`, extract text/links and return.
+* [x] If blocked or `render=1`, escalate request to Stealth Browser Pool.
+* [x] Save result to cache and return response.
 
 
-* [ ] Stage changes and commit Phase 4 (`git commit -m "feat(scrape): complete Phase 4 - orchestration and ops"`).
+* [x] Stage changes and commit Phase 4 (`git commit -m "feat(scrape): complete Phase 4 - orchestration and ops"`).
 
 ---
 
