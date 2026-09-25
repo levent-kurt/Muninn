@@ -80,23 +80,23 @@
 
 ## Phase 3: Isolated Stealth Browser Pool
 
-* [ ] **Dependency Pinning (`requirements.txt`)**
-* [ ] Pin `playwright` and `playwright-stealth` to exact stable versions.
+* [x] **Dependency Pinning (`requirements.txt`)**
+* [x] Pin `playwright` and `playwright-stealth` to exact stable versions.
 
 
-* [ ] **Browser Pool Service (`browser_pool/manager.py`)**
-* [ ] Implement lazy-start logic: Initialize Chromium instance only upon the first `render=1` request or fast-path block trigger.
-* [ ] Set up auto-shutdown timer: Close browser context after 5 minutes of idle time.
-* [ ] Limit concurrency to max 1-2 `BrowserContext` instances.
-* [ ] Implement per-page recycling: Open fresh context/page per job and destroy it immediately after extraction to prevent memory leaks and tracking across sites.
+* [x] **Browser Pool Service (`browser_pool/manager.py`)**
+* [x] Implement lazy-start logic: Initialize Chromium instance only upon the first `render=1` request or fast-path block trigger.
+* [x] Set up auto-shutdown timer: Close browser context after 5 minutes of idle time.
+* [x] Limit concurrency to max 1-2 `BrowserContext` instances.
+* [x] Implement per-page recycling: Open fresh context/page per job and destroy it immediately after extraction to prevent memory leaks and tracking across sites.
 
 
-* [ ] **Standalone Process Architecture (`browser_pool/worker.py`)**
-* [ ] Decouple browser pool worker execution from the main API process using an internal IPC / HTTP endpoint or queue interface.
-* [ ] Ensure process supervisor settings are configured (`Restart=always`).
+* [x] **Standalone Process Architecture (`browser_pool/worker.py`)**
+* [x] Decouple browser pool worker execution from the main API process using an internal IPC / HTTP endpoint or queue interface.
+* [x] Ensure process supervisor settings are configured (`Restart=always`).
 
 
-* [ ] Stage changes and commit Phase 3 (`git commit -m "feat(scrape): complete Phase 3 - stealth browser pool"`).
+* [x] Stage changes and commit Phase 3 (`git commit -m "feat(scrape): complete Phase 3 - stealth browser pool"`).
 
 ---
 
