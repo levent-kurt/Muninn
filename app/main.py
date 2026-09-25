@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from app.cache import SearchCache
 from app.config import SUPPORTED_ENGINES, Settings, get_settings
 from app.engine_manager import AllEnginesQuarantinedError, EngineManager
+from app.engine_state_store import EngineStateStore
 from app.search_service import SearchService
 from browser_pool.manager import BrowserPoolManager
 from drivers.browser_driver import BrowserDriver, BrowserDriverError
@@ -54,30 +55,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         driver = driver_factory(settings)
-        cache = SearchCache(settings.cache_db_path, settings.cache_ttl_seconds)
-        engines = EngineManager(settings)
         if driver is None:
             raise RuntimeError(
                 "driver_factory returned no browser driver; the search API cannot start"
             )
-        service = SearchService(settings, driver, cache, engines)
-
-        # --- scrape module -------------------------------------------------
+        cache = SearchCache(settings.cache_db_path, settings.cache_ttl_seconds)
         fetch: FastPathFetcher = scrape_fetcher_factory(settings)
-        politeness = HostPoliteness(
-            settings.per_host_delay_seconds,
-            settings.politeness_idle_evict_seconds,
-        )
-        scrape_cache = ScrapeCache(settings.scrape_cache_ttl, settings.scrape_cache_max_entries)
-        limiter = RateLimiter(settings.scrape_rate_limit_per_minute)
         pool: BrowserPoolManager = scrape_pool_factory(settings)
-        scrape_service = ScrapeService(
-            settings,
-            fetcher=fetch,
-            politeness=politeness,
-            cache=scrape_cache,
-            browser_pool=pool,
-        )
 
         try:
             await driver.start()
@@ -86,6 +70,29 @@ def create_app(
         except BrowserDriverError as exc:
             logger.error("browser failed to start: %s", exc)
             raise
+
+        # The engine manager needs the open cache connection to make its
+        # circuit-breaker state durable, and is restored before any traffic is
+        # served so a restart does not re-hammer an engine that just blocked us.
+        engines = EngineManager(settings, store=EngineStateStore(cache.connection))
+        await engines.restore()
+        service = SearchService(settings, driver, cache, engines)
+
+        # --- scrape module -------------------------------------------------
+        politeness = HostPoliteness(
+            settings.per_host_delay_seconds,
+            settings.politeness_idle_evict_seconds,
+        )
+        scrape_cache = ScrapeCache(settings.scrape_cache_ttl, settings.scrape_cache_max_entries)
+        limiter = RateLimiter(settings.scrape_rate_limit_per_minute)
+        scrape_service = ScrapeService(
+            settings,
+            fetcher=fetch,
+            politeness=politeness,
+            cache=scrape_cache,
+            browser_pool=pool,
+        )
+
         await service.start()
         await pool.start()
 

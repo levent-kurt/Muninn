@@ -3,6 +3,9 @@
 Keys are the SHA-256 of the *normalized* query (``q.strip().lower()``), so
 identical queries (ignoring case/whitespace) reuse one cache row. Results are
 stored as JSON and expire after ``cache_ttl_seconds``.
+
+The same connection also carries the ``engine_state`` table, so search-engine
+circuit-breaker state survives a restart.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from app.engine_state_store import SCHEMA as ENGINE_STATE_SCHEMA
 from app.models import SearchResult
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,9 @@ class SearchCache:
             )
             """
         )
+        # Circuit-breaker state shares this connection so a restart does not
+        # forget that an engine is currently blocking us.
+        await self._db.execute(ENGINE_STATE_SCHEMA)
         await self._require_db().commit()
         logger.info("cache connected at %s (ttl=%ss)", self._db_path, self._ttl)
 
@@ -79,6 +86,11 @@ class SearchCache:
         if self._db is None:
             raise RuntimeError("SearchCache is not connected; call connect() first")
         return self._db
+
+    @property
+    def connection(self) -> aiosqlite.Connection:
+        """The live connection, for components that share this database."""
+        return self._require_db()
 
     # -- key helpers --------------------------------------------------------
 

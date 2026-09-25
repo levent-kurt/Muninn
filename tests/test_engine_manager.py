@@ -6,8 +6,10 @@ import time
 
 import pytest
 
+from app.cache import SearchCache
 from app.config import Settings
 from app.engine_manager import AllEnginesQuarantinedError, EngineManager
+from app.engine_state_store import EngineStateStore
 
 
 @pytest.fixture
@@ -122,3 +124,75 @@ async def test_requested_quarantined_engine_is_ignored(manager: EngineManager) -
     await manager.report_failure("ddg", "429")
     picked = await manager.resolve_engine("ddg")
     assert picked != "ddg"
+
+# --------------------------------------------------------------- durable state
+
+
+class ExplodingStore:
+    """A store that always fails, to prove telemetry cannot break a search."""
+
+    async def load(self) -> list:
+        raise RuntimeError("disk on fire")
+
+    async def save(self, *args, **kwargs) -> None:
+        raise RuntimeError("disk on fire")
+
+
+async def test_quarantine_survives_a_restart(tmp_path, settings: Settings) -> None:
+    """Circuit-breaker state must outlive the process.
+
+    A restart is exactly when you do not want to forget that an engine just
+    blocked you, so the manager persists counters and deadlines to SQLite and
+    reloads them on startup.
+    """
+    db_path = str(tmp_path / "state.db")
+
+    cache_a = SearchCache(db_path, ttl_seconds=60)
+    await cache_a.connect()
+    mgr_a = EngineManager(settings, store=EngineStateStore(cache_a.connection))
+    await mgr_a.report_failure("google", "captcha")
+    await mgr_a.report_failure("bing", "429")
+    await cache_a.close()
+
+    cache_b = SearchCache(db_path, ttl_seconds=60)
+    await cache_b.connect()
+    mgr_b = EngineManager(settings, store=EngineStateStore(cache_b.connection))
+    restored = await mgr_b.restore()
+    await cache_b.close()
+
+    assert restored == 2
+    active = mgr_b.active_engines()
+    assert "google" not in active
+    assert "bing" not in active
+    assert set(active) == {"ddg", "mojeek"}
+
+
+async def test_expired_quarantine_is_restored_as_usable(tmp_path) -> None:
+    """A cooldown that already elapsed must not come back as a live block."""
+    settings = Settings(quarantine_first_seconds=0, quarantine_escalated_seconds=0)
+    db_path = str(tmp_path / "state.db")
+
+    cache_a = SearchCache(db_path, ttl_seconds=60)
+    await cache_a.connect()
+    mgr_a = EngineManager(settings, store=EngineStateStore(cache_a.connection))
+    await mgr_a.report_failure("google", "captcha")
+    await cache_a.close()
+
+    cache_b = SearchCache(db_path, ttl_seconds=60)
+    await cache_b.connect()
+    mgr_b = EngineManager(settings, store=EngineStateStore(cache_b.connection))
+    await mgr_b.restore()
+    await cache_b.close()
+
+    assert "google" in mgr_b.active_engines()
+
+
+async def test_store_failure_never_breaks_a_search(settings: Settings) -> None:
+    mgr = EngineManager(settings, store=ExplodingStore())
+    await mgr.report_success("google")  # must not raise
+    assert "google" in mgr.active_engines()
+
+
+async def test_restore_survives_a_broken_store(settings: Settings) -> None:
+    mgr = EngineManager(settings, store=ExplodingStore())
+    assert await mgr.restore() == 0
