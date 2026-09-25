@@ -1,8 +1,10 @@
 fastapi>=0.115
 uvicorn[standard]>=0.32
-playwright>=1.49
-playwright-stealth>=2.0.3
+playwright==1.63.0
+playwright-stealth==2.0.3
 beautifulsoup4>=4.12
+lxml>=5.3
+trafilatura>=2.0
 aiosqlite>=0.20
 httpx>=0.27
 pytest>=8.0

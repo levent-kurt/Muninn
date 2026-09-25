@@ -74,6 +74,39 @@ class Settings:
     )
     locale: str = field(default_factory=lambda: os.environ.get("LOCALE", "en-US"))
 
+    # --- Scrape module (TODO2) ---------------------------------------------
+    # Content extraction / response shaping.
+    default_max_text: int = field(default_factory=lambda: _env_int("DEFAULT_MAX_TEXT", 32_000))
+    max_links_cap: int = field(default_factory=lambda: _env_int("MAX_LINKS_CAP", 60))
+    # Pages whose extracted text is smaller than this (despite a large raw
+    # HTML body) are treated as suspicious / blocked.
+    text_min_char_threshold: int = field(default_factory=lambda: _env_int("TEXT_MIN_CHAR_THRESHOLD", 200))
+    # A page whose raw HTML exceeds this is "large" for the thin-text rule.
+    text_anomaly_html_bytes: int = field(default_factory=lambda: _env_int("TEXT_ANOMALY_HTML_BYTES", 20_480))
+
+    # Scrape result cache (URL-keyed, TTL).
+    scrape_cache_ttl: int = field(default_factory=lambda: _env_int("SCRAPE_CACHE_TTL", 3_600))
+
+    # Fast-path (plain HTTP) fetch.
+    scrape_fast_path_timeout: float = field(default_factory=lambda: _env_float("SCRAPE_FAST_PATH_TIMEOUT", 20.0))
+    scrape_max_body_bytes: int = field(default_factory=lambda: _env_int("SCRAPE_MAX_BODY_BYTES", 10_000_000))
+
+    # Per-host politeness: minimum gap between consecutive requests to one
+    # hostname (applies across the fast-path AND browser-render legs).
+    per_host_delay_seconds: float = field(default_factory=lambda: _env_float("PER_HOST_DELAY_SECONDS", 2.0))
+
+    # Stealth browser pool / worker process.
+    browser_idle_timeout: int = field(default_factory=lambda: _env_int("BROWSER_IDLE_TIMEOUT", 300))
+    browser_max_contexts: int = field(default_factory=lambda: _env_int("BROWSER_MAX_CONTEXTS", 1))
+    scrape_render_timeout: float = field(default_factory=lambda: _env_float("SCRAPE_RENDER_TIMEOUT", 45.0))
+    # "subprocess" (manager spawns/supervises python -m browser_pool.worker)
+    # or "external" (worker runs as its own supervised service).
+    scrape_worker_mode: str = field(default_factory=lambda: os.environ.get("SCRAPE_WORKER_MODE", "subprocess"))
+    scrape_worker_host: str = field(default_factory=lambda: os.environ.get("SCRAPE_WORKER_HOST", "127.0.0.1"))
+    scrape_worker_port: int = field(default_factory=lambda: _env_int("SCRAPE_WORKER_PORT", 8_765))
+    scrape_worker_url: str = field(default_factory=lambda: os.environ.get("SCRAPE_WORKER_URL", ""))
+    scrape_worker_startup_timeout: float = field(default_factory=lambda: _env_float("SCRAPE_WORKER_STARTUP_TIMEOUT", 30.0))
+
     # --- Service ------------------------------------------------------------
     host: str = field(default_factory=lambda: os.environ.get("HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: _env_int("PORT", 8000))
