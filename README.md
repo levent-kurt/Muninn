@@ -1,4 +1,4 @@
-# Muninn — self-hosted search & scrape gateway
+# Muninn — Self-Hosted Stealth Web Search & Data Extraction Gateway for AI Agents
 
 Muninn is a lightweight, dockerized **search and scraping API** for a home
 server. It exposes a clean REST API for web searches while a single persistent,
