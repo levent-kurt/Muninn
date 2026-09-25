@@ -25,6 +25,24 @@ class BrowserDriverError(Exception):
     """Raised when the underlying browser cannot fulfil a request."""
 
 
+async def _settle(page: Page, quiet_ms: int = 1_500) -> None:
+    """Wait for client-side rendering to finish before reading the DOM.
+
+    Search engines paint results with JavaScript, so reading the DOM at
+    ``domcontentloaded`` yields an empty page. Waiting for networkidle is the
+    real signal, but a page with long-polling or analytics beacons never
+    reaches it - so we race networkidle against a fixed ceiling and take
+    whichever arrives first. That is faster than always sleeping, and it does
+    not hang on beacon-heavy pages.
+    """
+    try:
+        await page.wait_for_load_state("networkidle", timeout=quiet_ms)
+    except PWTimeoutError:
+        # Ceiling reached: the page is busy or beacons never stop. Whatever has
+        # rendered by now is still worth parsing.
+        logger.debug("networkidle not reached; capturing DOM as-is")
+
+
 class BrowserDriver:
     """Owns one persistent Chromium browser with a context per search engine."""
 
@@ -137,8 +155,7 @@ class BrowserDriver:
                 )
                 status = response.status if response is not None else None
                 if status is None or status < 400:
-                    # Give client-side rendered engines a beat to paint results.
-                    await page.wait_for_timeout(1500)
+                    await _settle(page)
                 html: str = await page.content()
                 return html, status
             except PWTimeoutError:

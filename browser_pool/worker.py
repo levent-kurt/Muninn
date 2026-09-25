@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse
 from playwright.async_api import (
     Browser,
     BrowserContext,
+    Page,
     Playwright,
     async_playwright,
 )
@@ -176,7 +177,7 @@ class BrowserController:
                 if response is not None:
                     status = response.status
                 if status < 400:
-                    await page.wait_for_timeout(800)
+                    await _settle(page)
             except PWTimeoutError:
                 logger.warning("render navigation timeout for %s", url)
             final_url = page.url
@@ -274,6 +275,19 @@ class BrowserController:
             os._exit(0)
 
 
+async def _settle(page: Page, quiet_ms: int = 800) -> None:
+    """Let client-side rendering finish before reading the DOM.
+
+    Same trade-off as the search driver: race ``networkidle`` against a ceiling,
+    so beacon-heavy pages cannot stall the render and fast pages do not pay a
+    fixed sleep.
+    """
+    try:
+        await page.wait_for_load_state("networkidle", timeout=quiet_ms)
+    except PWTimeoutError:  # pragma: no cover - timing dependent
+        logger.debug("networkidle not reached; capturing DOM as-is")
+
+
 def _truncate_html(html: str, max_bytes: int) -> str:
     """Cap rendered HTML by *encoded* size, not character count.
 
@@ -312,6 +326,12 @@ def _reap(tree: list[tuple[int, int]], profiles: set[str]) -> None:
             with suppress(ProcessLookupError, PermissionError):
                 os.killpg(pgid, signal.SIGKILL)
     for profile in profiles:
+        # TOCTOU note: pgrep lists pids, then we signal them. In principle the
+        # kernel could recycle a pid in that window and we would signal an
+        # unrelated process. The window is microseconds and the pattern is a
+        # specific profile directory, so the practical exposure is negligible;
+        # verifying the cmdline before each kill would cost a ps call per pid
+        # for a theoretical gain.
         try:
             out = subprocess.run(
                 ["pgrep", "-f", profile],

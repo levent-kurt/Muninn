@@ -300,7 +300,7 @@ engine manager rotates engines round-robin; a 429 or CAPTCHA quarantines that
 engine (30 min, then 12 h for consecutive failures) and the job retries on the
 next active one. Quarantine state is written to SQLite, so restarting the
 service does not immediately re-hammer an engine that just blocked you. All
-all four engines share one persistent Chromium, but each engine gets its own browser
+four engines share one persistent Chromium, but each engine gets its own browser
 context, so cookies and DOM state never cross sites; every request opens a
 fresh page that is closed afterwards.
 
