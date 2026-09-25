@@ -8,8 +8,9 @@
   browser idle-shutdown applies.
 * **Respawn on crash** - a worker that dies mid-job is restarted once and the
   job retried; repeated failures raise :class:`BrowserPoolUnavailable`.
-* **Concurrency** - the worker enforces ``BROWSER_MAX_CONTEXTS``; the manager
-  only serializes its own supervision actions, never the render load.
+* **Concurrency** - renders are dispatched without holding the supervision lock;
+  the worker itself enforces ``BROWSER_MAX_CONTEXTS`` (a semaphore) and its
+  browser pool queues the rest.
 
 Two deployment modes (``SCRAPE_WORKER_MODE``):
   * ``subprocess`` (default): the manager spawns/supervises
@@ -26,8 +27,8 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
 import httpx
@@ -81,7 +82,12 @@ class BrowserPoolManager:
         self._last_use: float = time.monotonic()
         self._active_jobs = 0
         self._watchdog: asyncio.Task | None = None
+        # Guards worker lifecycle transitions (spawn/terminate) only. It is
+        # deliberately NOT held across a render: the worker's own semaphore
+        # governs browser concurrency, so serialising supervision must not
+        # serialise traffic (see render()).
         self._lock = asyncio.Lock()
+        self._shared_client: httpx.AsyncClient | None = None
         self.started_at: float | None = None
 
     # -- basics --------------------------------------------------------------
@@ -102,15 +108,38 @@ class BrowserPoolManager:
     def _client(self) -> httpx.AsyncClient:
         if self._client_factory is not None:
             return self._client_factory(self.worker_url)
-        return httpx.AsyncClient(
-            base_url=self.worker_url,
-            timeout=httpx.Timeout(
-                connect=5.0,
-                read=self._settings.scrape_render_timeout + 10,
-                write=10.0,
-                pool=10.0,
-            ),
-        )
+        if self._shared_client is None:
+            self._shared_client = httpx.AsyncClient(
+                base_url=self.worker_url,
+                timeout=httpx.Timeout(
+                    connect=5.0,
+                    read=self._settings.scrape_render_timeout + 10,
+                    write=10.0,
+                    pool=10.0,
+                ),
+            )
+        return self._shared_client
+
+    async def _close_client(self) -> None:
+        if self._shared_client is not None:
+            await self._shared_client.aclose()
+            self._shared_client = None
+
+    @asynccontextmanager
+    async def _client_ctx(self) -> AsyncIterator[httpx.AsyncClient]:
+        """Yield a client, closing it only when one was injected per call.
+
+        Without this, a shared client would be torn down after the first
+        request; with it, the default path reuses one connection pool for the
+        process lifetime while tests keep full control.
+        """
+        injected = self._client_factory is not None
+        client = self._client()
+        try:
+            yield client
+        finally:
+            if injected:
+                await client.aclose()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -126,6 +155,7 @@ class BrowserPoolManager:
             self._watchdog = None
         if self.mode == "subprocess" and self._process is not None:
             await self._terminate_worker()
+        await self._close_client()
 
     # -- worker supervision -----------------------------------------------------
 
@@ -138,19 +168,29 @@ class BrowserPoolManager:
         """Spawn (subprocess mode) or probe (external mode) the worker."""
         if self._process_alive():
             return
-        if self.mode == "subprocess":
-            if self._process is not None and self._process.returncode is not None:
-                if self._process.returncode == 0:
-                    # Clean idle exit - just forget it; lazy-stop state.
-                    self._process = None
-                else:
-                    logger.warning("worker died (exit %s) - respawning",
-                                   self._process.returncode)
-                    self._process = None
-            await self._spawn_worker()
+        # The lock guards the spawn decision only, never a render.
+        async with self._lock:
+            # Re-check under the lock: a concurrent caller may have spawned it
+            # between our fast-path check and acquiring the lock.
+            if self._process_alive():
+                pass
+            elif self.mode == "subprocess":
+                if self._process is not None and self._process.returncode is not None:
+                    if self._process.returncode == 0:
+                        # Clean idle exit - just forget it; lazy-stop state.
+                        self._process = None
+                    else:
+                        logger.warning("worker died (exit %s) - respawning",
+                                       self._process.returncode)
+                        self._process = None
+                await self._spawn_worker()
+            else:
+                await self._wait_until_ready()
+                return
         await self._wait_until_ready()
 
     async def _spawn_worker(self) -> None:
+        """Spawn the worker subprocess. Caller must hold ``self._lock``."""
         port = self._settings.scrape_worker_port
         cmd = [
             sys.executable,
@@ -177,7 +217,7 @@ class BrowserPoolManager:
     async def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + self._settings.scrape_worker_startup_timeout
         backoff = 0.2
-        async with self._client() as client:
+        async with self._client_ctx() as client:
             while time.monotonic() < deadline:
                 if self.mode == "subprocess" and not self._process_alive():
                     raise BrowserPoolUnavailable("scrape worker exited during startup")
@@ -192,40 +232,39 @@ class BrowserPoolManager:
         raise BrowserPoolUnavailable(f"scrape worker not ready at {self.worker_url}")
 
     async def _terminate_worker(self, grace: float = 10.0) -> None:
-        proc, self._process = self._process, None
-        if proc is None or proc.returncode is not None:
-            return
-        proc.terminate()
-        try:
-            # Give the worker time to run its graceful shutdown (uvicorn
-            # lifespan stop closes Chromium, so no orphaned browser processes).
-            await asyncio.wait_for(proc.wait(), timeout=grace)
-        except asyncio.TimeoutError:
-            logger.warning("worker did not stop within %.0fs - killing", grace)
-            try:
-                proc.kill()
-            except ProcessLookupError:
+        async with self._lock:
+            proc, self._process = self._process, None
+            if proc is None or proc.returncode is not None:
                 return
-            await proc.wait()
-        except ProcessLookupError:  # pragma: no cover - race with exit
-            return
+            proc.terminate()
+            try:
+                # Give the worker time to run its graceful shutdown (uvicorn
+                # lifespan stop closes Chromium, so no orphaned browser processes).
+                await asyncio.wait_for(proc.wait(), timeout=grace)
+            except asyncio.TimeoutError:
+                logger.warning("worker did not stop within %.0fs - killing", grace)
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    return
+                await proc.wait()
+            except ProcessLookupError:  # pragma: no cover - race with exit
+                return
 
     # -- render ---------------------------------------------------------------
 
     async def render(self, url: str, goto_timeout_ms: int = 60_000) -> RenderOutcome:
-        async with self._lock:
-            self._active_jobs += 1
-            try:
-                payload = await self._render_once(url, goto_timeout_ms)
-            finally:
-                self._active_jobs -= 1
-                self._last_use = time.monotonic()
-        return payload
+        self._active_jobs += 1
+        try:
+            return await self._render_once(url, goto_timeout_ms)
+        finally:
+            self._active_jobs -= 1
+            self._last_use = time.monotonic()
 
     async def _render_once(self, url: str, goto_timeout_ms: int) -> RenderOutcome:
         await self._ensure_worker()
         try:
-            async with self._client() as client:
+            async with self._client_ctx() as client:
                 resp = await client.post(
                     "/render",
                     json={"url": url, "goto_timeout_ms": goto_timeout_ms},
@@ -253,9 +292,10 @@ class BrowserPoolManager:
         """One supervised retry: restart the worker and replay the job."""
         logger.warning("worker died mid-render; respawning and retrying once")
         await self._terminate_worker()
-        await self._spawn_worker()
+        async with self._lock:
+            await self._spawn_worker()
         await self._wait_until_ready()
-        async with self._client() as client:
+        async with self._client_ctx() as client:
             resp = await client.post(
                 "/render", json={"url": url, "goto_timeout_ms": goto_timeout_ms}
             )
@@ -289,7 +329,7 @@ class BrowserPoolManager:
                     detail=f"worker exited ({self._process.returncode})",
                 )
         try:
-            async with self._client() as client:
+            async with self._client_ctx() as client:
                 resp = await client.get("/ping")
                 if resp.status_code != 200:
                     return PoolStatus(ok=False, mode=self.mode, detail=f"HTTP {resp.status_code}")

@@ -1,9 +1,14 @@
-"""Fast-path (plain HTTP) fetcher (TODO2 Phase 2).
+"""Fast-path (plain HTTP) fetcher.
 
 Emulates a real browser at the header level (realistic ``User-Agent`` and
 ``Accept-Language``) via ``httpx``. Redirects are followed transparently and
 the post-redirect URL is captured as ``final_url``. Bodies are read with a
 hard byte cap so one hostile response cannot exhaust memory.
+
+Connection reuse: one ``httpx.AsyncClient`` (and therefore one TLS context and
+one connection pool) is shared across requests, created on first use and closed
+by :meth:`close`. Tests inject a per-request client factory with a mock
+transport instead, which is why the factory path is still owned per call.
 """
 
 from __future__ import annotations
@@ -44,6 +49,20 @@ class FastPathFetcher:
         self._settings = settings
         # Tests inject a client with a MockTransport here.
         self._client_factory = client_factory
+        self._client: httpx.AsyncClient | None = None
+
+    # -- lifecycle -----------------------------------------------------------
+
+    async def start(self) -> None:
+        """Open the shared client up front so the first request is not slower."""
+        if self._client is None and self._client_factory is None:
+            self._client = self._default_client()
+
+    async def close(self) -> None:
+        """Close the shared client."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     # -- client ---------------------------------------------------------------
 
@@ -67,29 +86,51 @@ class FastPathFetcher:
             },
         )
 
-    def _make_client(self) -> httpx.AsyncClient:
+    def _client_for_request(self) -> httpx.AsyncClient:
         if self._client_factory is not None:
             return self._client_factory()
-        return self._default_client()
+        if self._client is None:
+            self._client = self._default_client()
+        return self._client
 
     # -- fetch ----------------------------------------------------------------
 
     async def fetch(self, url: str) -> FastPathResult:
-        client = self._make_client()
+        """Fetch ``url``, mapping every failure mode to :class:`FastPathError`.
+
+        Client *construction* is inside the guard as well as the request: an
+        SSL/TLS problem (missing CA bundle, unreadable trust store) raises from
+        ``httpx.AsyncClient(...)`` itself, and that used to escape the endpoint
+        as an opaque HTTP 500 instead of the documented 502.
+        """
+        injected = self._client_factory is not None
         try:
-            async with client, client.stream("GET", url) as resp:
-                body = await self._read_bounded(resp)
-        except httpx.HTTPError as exc:
+            client = self._client_for_request()
+            try:
+                async with client.stream("GET", url) as resp:
+                    body = await self._read_bounded(resp)
+                    final_url = str(resp.url)
+                    status = resp.status_code
+                    content_type = resp.headers.get("content-type", "").split(";")[0].strip()
+                    encoding = resp.encoding
+                    redirect_count = len(resp.history) if resp.history else 0
+            finally:
+                # Only an injected (per-request) client is ours to close.
+                if injected:
+                    await client.aclose()
+        except FastPathError:
+            raise
+        except (httpx.HTTPError, OSError, ValueError) as exc:
             raise FastPathError(f"fast-path fetch failed for {url}: {exc}") from exc
 
-        html = body.decode(resp.encoding or "utf-8", errors="replace")
+        html = body.decode(encoding or "utf-8", errors="replace")
         return FastPathResult(
             url=url,
-            final_url=str(resp.url),
-            status=resp.status_code,
-            content_type=resp.headers.get("content-type", "").split(";")[0].strip(),
+            final_url=final_url,
+            status=status,
+            content_type=content_type,
             html=html,
-            redirect_count=len(resp.history) if resp.history else 0,
+            redirect_count=redirect_count,
         )
 
     async def _read_bounded(self, resp: httpx.Response) -> bytes:

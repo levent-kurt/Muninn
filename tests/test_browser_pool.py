@@ -251,3 +251,78 @@ async def test_retry_after_respawn(fake_process: FakeProcess, monkeypatch) -> No
     outcome = await manager._retry_after_respawn("https://x/", 5_000)
     assert outcome.html == "retried"
     assert fake_process.terminated is True  # dead worker was torn down first
+
+# --------------------------------------------------------------------------- concurrency
+
+
+async def test_concurrent_renders_are_not_serialised_by_the_manager(
+    monkeypatch,
+) -> None:
+    """A slow render must not block other callers.
+
+    Regression test: the manager used to hold its supervision lock for the whole
+    render, so one 45s page load blocked every other scrape request behind it.
+    Two renders here must be in flight at the same time.
+    """
+    inflight = 0
+    peak = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal inflight, peak
+        if request.url.path == "/ping":
+            return httpx.Response(200, json={"ok": True})
+        inflight += 1
+        peak = max(peak, inflight)
+        try:
+            await asyncio.sleep(0.15)
+            return httpx.Response(
+                200,
+                json={"html": "<html/>", "final_url": "https://x/", "status": 200,
+                      "elapsed_ms": 150, "error": None},
+            )
+        finally:
+            inflight -= 1
+
+    manager = BrowserPoolManager(
+        _settings(scrape_worker_mode="external"),
+        http_client_factory=_client_factory(handler),
+    )
+
+    results = await asyncio.gather(
+        manager.render("https://a.example/"),
+        manager.render("https://b.example/"),
+    )
+    await manager.stop()
+
+    assert len(results) == 2
+    assert peak == 2, "renders were serialised; the supervision lock leaked into the render path"
+
+
+async def test_shared_client_is_reused_across_renders(monkeypatch) -> None:
+    """The default client path keeps one connection pool instead of one per call."""
+    built: list[httpx.AsyncClient] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/ping":
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(
+            200, json={"html": "<html/>", "final_url": "https://x/", "status": 200,
+                       "elapsed_ms": 1, "error": None}
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def counting_factory(*args, **kwargs):
+        kwargs.setdefault("transport", httpx.MockTransport(handler))
+        client = real_async_client(*args, **kwargs)
+        built.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, "AsyncClient", counting_factory)
+
+    manager = BrowserPoolManager(_settings(scrape_worker_mode="external"))
+    await manager.render("https://a.example/")
+    await manager.render("https://b.example/")
+    await manager.stop()
+
+    assert len(built) == 1, f"expected one shared client, built {len(built)}"

@@ -82,6 +82,7 @@ def create_app(
         try:
             await driver.start()
             await cache.connect()
+            await fetch.start()
         except BrowserDriverError as exc:
             logger.error("browser failed to start: %s", exc)
             raise
@@ -104,6 +105,7 @@ def create_app(
         await service.stop()
         await pool.stop()
         await driver.stop()
+        await fetch.close()
         await cache.close()
 
     app = FastAPI(
