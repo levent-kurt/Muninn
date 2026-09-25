@@ -42,7 +42,10 @@ test: ## Run the test suite (offline, no browser needed)
 	$(PYTEST)
 
 run: ## Run the API locally with autoreload
-	$(BIN)/uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+	$(BIN)/uvicorn app.main:app --reload --host $${HOST:-127.0.0.1} --port $${PORT:-9999}
+
+serve: ## Run the API without autoreload, honouring HOST/PORT from app/config.py
+	$(BIN)/python -m app.main
 
 docker-build: ## Build the image
 	docker compose build

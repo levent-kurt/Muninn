@@ -169,3 +169,55 @@ def test_health_reports_scrape_cache_and_rate_limiter(client) -> None:
     assert body["browser_ready"] is True
     assert body["scrape_cache"]["entries"] >= 0
     assert body["rate_limiter"]["per_minute"] > 0
+
+
+# ------------------------------------------------------------------ OpenAPI / docs
+
+
+def test_openapi_schema_is_served_and_describes_every_endpoint(client) -> None:
+    r = client.get("/openapi.json")
+    assert r.status_code == 200
+    spec = r.json()
+    assert spec["info"]["title"] == "Muninn API Gateway"
+    assert spec["info"]["license"]["name"] == "MIT"
+    # Every public endpoint is documented.
+    for path in ("/search", "/scrape", "/status", "/health", "/health/live", "/health/ready"):
+        assert path in spec["paths"], f"{path} missing from the OpenAPI schema"
+        assert "get" in spec["paths"][path]
+
+
+def test_openapi_documents_error_responses(client) -> None:
+    """The status codes the README promises must be in the schema, not just prose."""
+    responses = client.get("/openapi.json").json()["paths"]["/scrape"]["get"]["responses"]
+    for code in ("200", "400", "403", "422", "429", "502", "503"):
+        assert code in responses, f"/scrape {code} undocumented"
+
+
+def test_openapi_has_response_schemas_and_examples(client) -> None:
+    op = client.get("/openapi.json").json()["paths"]["/scrape"]["get"]
+    assert "summary" in op and op["summary"]
+    assert "application/json" in op["responses"]["200"]["content"]
+    # Error bodies are typed, so Swagger renders them as a model.
+    assert op["responses"]["400"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ErrorResponse"
+    )
+
+
+def test_search_documents_its_error_codes(client) -> None:
+    responses = client.get("/openapi.json").json()["paths"]["/search"]["get"]["responses"]
+    for code in ("200", "422", "503", "504"):
+        assert code in responses
+
+
+def test_swagger_ui_is_served_by_default(client) -> None:
+    assert client.get("/docs").status_code == 200
+    assert client.get("/redoc").status_code == 200
+
+
+def test_docs_can_be_disabled() -> None:
+    """DOCS_ENABLED=0 must remove the schema entirely, for exposed deployments."""
+    app = create_app(settings=make_test_settings(docs_enabled=False))
+    with TestClient(app) as c:
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert c.get(path).status_code == 404, f"{path} should be disabled"
+        assert c.get("/health/live").status_code == 200  # service still works

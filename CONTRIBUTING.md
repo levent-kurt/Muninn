@@ -28,7 +28,7 @@ python -m playwright install chromium
 Run the service while developing:
 
 ```bash
-make run             # uvicorn with reload on 127.0.0.1:8000
+make run             # uvicorn with reload on 127.0.0.1:9999
 ```
 
 ## Before you open a pull request
@@ -52,6 +52,11 @@ House rules the tooling cannot check for you:
 - **Update the docs with the code.** A new environment variable belongs in
   `README.md` and in `app/config.py`; a new endpoint belongs in the README's API
   section.
+- **Document every endpoint in the OpenAPI schema.** Swagger UI at `/docs` is
+  generated from the decorators, so a new endpoint needs a `summary`, a
+  `description`, a `response_model` or a `responses` block, and an entry in
+  `openapi_tags` if it introduces a new tag. `tests/test_api.py` asserts the
+  schema keeps up.
 - **Write comments for *why*.** The codebase explains reasoning, not mechanics.
   Match that.
 - **No new runtime dependencies without discussion.** They change the install

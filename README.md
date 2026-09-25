@@ -108,7 +108,7 @@ docker compose up -d
 ```
 
 This starts two containers from one image: `muninn` (the API, published on
-`127.0.0.1:8000`) and `scrape-worker` (the browser pool, reachable only on the
+`127.0.0.1:9999`) and `scrape-worker` (the browser pool, reachable only on the
 internal network).
 
 ---
@@ -118,7 +118,7 @@ internal network).
 ### Locally
 
 ```bash
-make run      # uvicorn with reload on 127.0.0.1:8000
+make run      # uvicorn with reload on 127.0.0.1:9999
 ```
 
 ### With Docker Compose
@@ -139,8 +139,13 @@ scrape pool are healthy. Cached queries survive restarts in `./data`.
 
 ## 3. API
 
-Interactive docs are **off by default** because the service is unauthenticated.
-Set `DOCS_ENABLED=1` locally, then browse `http://127.0.0.1:8000/docs`.
+**Interactive documentation is served at <http://127.0.0.1:9999/docs>** (Swagger
+UI), with a ReDoc view at `/redoc` and the raw schema at `/openapi.json`. Every
+endpoint documents its parameters, response schema, worked examples and each
+error code it can return.
+
+The service is unauthenticated, so set `DOCS_ENABLED=0` anywhere the machine is
+reachable by someone you would not trust with the schema.
 
 ### `GET /search` — execute a search
 
@@ -152,7 +157,7 @@ Set `DOCS_ENABLED=1` locally, then browse `http://127.0.0.1:8000/docs`.
 | `force_refresh`  | bool    | `false` | bypass the cache for the read           |
 
 ```bash
-curl "http://127.0.0.1:8000/search?q=python+web+scraping&max_results=5"
+curl "http://127.0.0.1:9999/search?q=python+web+scraping&max_results=5"
 ```
 
 ```json
@@ -180,8 +185,8 @@ Status codes: `200` ok · `422` bad parameters · `503` every engine quarantined
 | `max_text` | int  | `32000` | 1–32000 body-text characters                        |
 
 ```bash
-curl "http://127.0.0.1:8000/scrape?url=https://example.com"
-curl "http://127.0.0.1:8000/scrape?url=https://example.com&render=1"
+curl "http://127.0.0.1:9999/scrape?url=https://example.com"
+curl "http://127.0.0.1:9999/scrape?url=https://example.com&render=1"
 ```
 
 ```json
@@ -207,7 +212,7 @@ disallowed by `robots.txt` · `422` bad parameters · `429` rate limited (with
 
 ```python
 import httpx
-r = httpx.get("http://127.0.0.1:8000/scrape", params={"url": "https://example.com"})
+r = httpx.get("http://127.0.0.1:9999/scrape", params={"url": "https://example.com"})
 print(r.json()["title"])
 ```
 
@@ -232,8 +237,8 @@ Everything is an environment variable; the full list with defaults lives in
 | Variable | Default | Description |
 |---|---|---|
 | `HOST` | `127.0.0.1` | Bind address (compose sets `0.0.0.0`) |
-| `PORT` | `8000` | Bind port |
-| `DOCS_ENABLED` | `false` | Publish `/docs`, `/redoc`, `/openapi.json` |
+| `PORT` | `9999` | Bind port |
+| `DOCS_ENABLED` | `true` | Serve `/docs` (Swagger UI), `/redoc` and `/openapi.json` |
 | `CACHE_DB_PATH` | `data/cache.db` | SQLite path (`:memory:` disables disk) |
 | `CACHE_TTL_SECONDS` | `86400` | Search cache TTL |
 | `THROTTLE_MIN_DELAY` | `15` | Min seconds between outbound searches |
@@ -340,10 +345,13 @@ building a half-working auth layer would be worse than being explicit about the
 boundary. The defaults are therefore safe rather than secure-but-surprising:
 
 - binds **`127.0.0.1`** (and compose publishes the port to `127.0.0.1`);
-- **`/docs`, `/redoc` and `/openapi.json` are disabled** unless
-  `DOCS_ENABLED=1`;
 - containers run as a **non-root user** with a read-only root filesystem,
   `cap_drop: ALL` and `no-new-privileges`.
+
+`/docs`, `/redoc` and `/openapi.json` are served **by default**, because they
+are the fastest way to understand the API. They are the one default that widens
+exposure, so turn them off with `DOCS_ENABLED=0` anywhere the machine is
+reachable by someone you would not trust with the schema.
 
 What the code *does* enforce:
 

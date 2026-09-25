@@ -26,7 +26,7 @@ RUN pip install --upgrade pip \
 COPY . .
 
 # Run unprivileged. Chromium is launched with --no-sandbox (see
-# SCRAPE_NO_SANDBOX), so the container's user must not be root either.
+# BROWSER_NO_SANDBOX), so the container's user must not be root either.
 RUN useradd --create-home --uid 10001 muninn \
     && mkdir -p /app/data \
     && chown -R muninn:muninn /app
@@ -35,11 +35,11 @@ USER muninn
 # Persistent cache database and worker log live in a mounted volume.
 VOLUME ["/app/data"]
 
-# 8000 = API gateway, 8765 = scrape worker (internal only; not published).
-EXPOSE 8000 8765
+# 9999 = API gateway, 8765 = scrape worker (internal only; not published).
+EXPOSE 9999 8765
 
 # Liveness without curl (python:slim does not ship it).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9999/health/live', timeout=4)"]
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9999"]

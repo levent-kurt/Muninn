@@ -1,3 +1,6 @@
-"""Pydantic schemas for the /scrape module."""
+"""Pydantic schemas for the HTTP layer."""
 
-__all__ = ["LinkItem", "ScrapeResponse"]
+from schemas.common import ErrorResponse
+from schemas.scrape import LinkItem, ScrapeResponse
+
+__all__ = ["ErrorResponse", "LinkItem", "ScrapeResponse"]

@@ -59,13 +59,16 @@ documenting the boundary clearly.
   user model, no API key, and no per-tenant accounting.
   - The service therefore **binds to `127.0.0.1` by default**, and the
     published Docker port is bound to `127.0.0.1` too.
-  - `/docs`, `/redoc` and `/openapi.json` are **disabled by default**
-    (`DOCS_ENABLED=1` re-enables them).
+  - `/docs`, `/redoc` and `/openapi.json` are **served by default**. They are
+    documentation, not data, but the schema describes every available operation
+    — set `DOCS_ENABLED=0` on any deployment you do not control.
   - If you need it reachable from elsewhere, put it behind a reverse proxy that
     does the authentication, or build authentication into your own fork. That is
     your responsibility, not the project's.
-- **No rate limiting on `/search`.** The search queue is bounded and will return
-  an error rather than grow without limit, but there is no per-client quota.
+- **No rate limiting on `/search`, and the search queue is unbounded.** Each
+  request waits at most `REQUEST_TIMEOUT_SECONDS`, so the queue drains eventually,
+  but an anonymous caller can grow it faster than the 15–30s throttler empties
+  it. `POST` a rate limit in front of `/search` if you expose it.
 - **DNS rebinding**, as described above.
 - **Sandbox-escape hardening.** Chromium is launched with `--no-sandbox` by
   default (`BROWSER_NO_SANDBOX`), which is what makes it work in minimal
@@ -79,7 +82,8 @@ documenting the boundary clearly.
 1. Keep the API on `127.0.0.1` behind an authenticating reverse proxy.
 2. Leave `SCRAPE_RESPECT_ROBOTS=true`.
 3. Leave `SCRAPE_ALLOW_PRIVATE_TARGETS=false` and `SCRAPE_ALLOWED_HOSTS` empty.
-4. Leave `DOCS_ENABLED` unset.
-5. Keep the container unprivileged with a read-only root filesystem and
+4. Set `DOCS_ENABLED=0`.
+5. Rate-limit `/search` at the proxy; it has no built-in limit.
+6. Keep the container unprivileged with a read-only root filesystem and
    `cap_drop: ALL`.
-6. Keep `SCRAPE_RATE_LIMIT_PER_MINUTE` at or below the default.
+7. Keep `SCRAPE_RATE_LIMIT_PER_MINUTE` at or below the default.

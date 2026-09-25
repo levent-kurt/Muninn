@@ -14,6 +14,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -21,6 +22,7 @@ from app.cache import SearchCache
 from app.config import SUPPORTED_ENGINES, Settings, get_settings
 from app.engine_manager import AllEnginesQuarantinedError, EngineManager
 from app.engine_state_store import EngineStateStore
+from app.models import SearchResponse
 from app.search_service import SearchService
 from browser_pool.manager import BrowserPoolManager
 from drivers.browser_driver import BrowserDriver, BrowserDriverError
@@ -30,6 +32,7 @@ from ops.politeness import HostPoliteness
 from ops.ratelimit import RateLimiter
 from routers.health import router as health_router
 from routers.scrape import router as scrape_router
+from schemas.common import ErrorResponse
 from services.scrape_service import ScrapeService
 
 logging.basicConfig(
@@ -122,11 +125,50 @@ def create_app(
 
     app = FastAPI(
         title="Muninn API Gateway",
-        description="Unified REST API for stealth web search (/search) and page scraping (/scrape).",
+        summary="Self-hosted web search and page scraping over a stealth browser.",
+        description=(
+            "Muninn exposes a small REST API in front of a persistent, "
+            "anti-bot-hardened Chromium instance.\n\n"
+            "* **`/search`** runs a query through a rotating pool of search "
+            "engines, behind a throttling queue and a circuit breaker that "
+            "quarantines engines which block us.\n"
+            "* **`/scrape`** fetches an arbitrary public URL, escalating to an "
+            "isolated stealth-browser process when the site challenges the "
+            "request, and returns clean text, metadata and links.\n\n"
+            "**This service is unauthenticated and single-user.** It binds to "
+            "`127.0.0.1` by default; see the Security and Legal sections of the "
+            "README before exposing it anywhere else."
+        ),
         version="0.1.0",
         lifespan=lifespan,
-        # The service is unauthenticated, so its schema is not published by
-        # default. Enable with DOCS_ENABLED=1 for local development.
+        contact={"name": "Levent Kurt", "url": "https://github.com/leventkurt/muninn"},
+        license_info={
+            "name": "MIT",
+            "url": "https://github.com/leventkurt/muninn/blob/main/LICENSE",
+        },
+        openapi_tags=[
+            {
+                "name": "search",
+                "description": "Execute searches across Google, Bing, DuckDuckGo "
+                "and Mojeek through a stealth browser.",
+            },
+            {
+                "name": "scrape",
+                "description": "Fetch and extract a page, escalating to a stealth "
+                "browser when the site blocks the request.",
+            },
+            {
+                "name": "health",
+                "description": "Liveness, readiness and the deep health report.",
+            },
+            {
+                "name": "status",
+                "description": "Queue, cache and per-engine metrics.",
+            },
+        ],
+        # Swagger UI is served by default. The service has no authentication, so
+        # DOCS_ENABLED=0 is the switch to turn the schema off where the machine
+        # is reachable by anyone else.
         docs_url="/docs" if settings.docs_enabled else None,
         redoc_url="/redoc" if settings.docs_enabled else None,
         openapi_url="/openapi.json" if settings.docs_enabled else None,
@@ -143,19 +185,88 @@ def create_app(
                 "/search": "GET q, max_results, engine, force_refresh",
                 "/scrape": "GET url, render, max_text",
                 "/health": "GET service health (fetcher + browser pool)",
+                "/health/live": "GET cheap liveness probe",
+                "/health/ready": "GET readiness probe",
                 "/status": "GET engine + queue metrics",
+                "/docs": "GET Swagger UI (DOCS_ENABLED, default on)",
+                "/redoc": "GET ReDoc reference view",
+                "/openapi.json": "GET the OpenAPI schema",
             },
             "engines": list(SUPPORTED_ENGINES),
         }
 
-    @app.get("/search")
+    @app.get(
+        "/search",
+        tags=["search"],
+        summary="Execute a search",
+        description=(
+            "Runs `q` against a search engine through the stealth browser.\n\n"
+            "Uncached queries join a FIFO queue drained by a single worker that "
+            "enforces a randomized delay between outbound requests, which keeps "
+            "a residential IP well below quota. Engines rotate round-robin; an "
+            "engine that answers 429 or a CAPTCHA is quarantined (30 minutes, "
+            "then 12 hours for consecutive failures) and the query is retried on "
+            "the next active engine.\n\n"
+            "Successful queries are cached in SQLite for `CACHE_TTL_SECONDS` and "
+            "replayed from cache on a repeat, which is why `force_refresh` still "
+            "returns and re-stores the result but reads through the engine."
+        ),
+        response_model=SearchResponse,
+        responses={
+            200: {
+                "description": "Search executed (or served from cache).",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "query": "python web scraping",
+                            "engine_used": "google",
+                            "cached": False,
+                            "execution_time_ms": 22140,
+                            "results_count": 2,
+                            "results": [
+                                {
+                                    "title": "Web Scraping - Real Python",
+                                    "url": "https://realpython.com/scraping/",
+                                    "snippet": "Learn how to scrape the web with Python.",
+                                },
+                                {
+                                    "title": "Scrapy | A Fast and Powerful",
+                                    "url": "https://scrapy.org/",
+                                    "snippet": "An open source and collaborative framework.",
+                                },
+                            ],
+                        }
+                    }
+                },
+            },
+            422: {"model": ErrorResponse, "description": "Invalid query parameters."},
+            503: {
+                "model": ErrorResponse,
+                "description": "Every search engine is currently quarantined.",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "error": "all_engines_quarantined",
+                            "detail": "every search engine is under quarantine; try again later",
+                        }
+                    }
+                },
+            },
+            504: {"model": ErrorResponse, "description": "The search timed out in the queue."},
+        },
+    )
     async def search(
         request: Request,
         q: str = Query(..., min_length=1, max_length=500, description="Search query"),
         max_results: int = Query(10, ge=1, le=50, description="Max organic results to yield"),
-        engine: str | None = Query(None, description="Preferred engine (google|bing|ddg|mojeek)"),
-        force_refresh: bool = Query(False, description="Bypass the cache"),
-    ) -> JSONResponse:
+        engine: str | None = Query(
+            None,
+            description="Preferred engine. Ignored (and another engine used) if the "
+            "requested one is quarantined.",
+            examples=["google"],
+        ),
+        force_refresh: bool = Query(False, description="Bypass the cache for this read"),
+    ) -> SearchResponse | JSONResponse:
         if engine is not None and engine not in SUPPORTED_ENGINES:
             raise HTTPException(
                 status_code=422,
@@ -184,9 +295,50 @@ def create_app(
             raise HTTPException(
                 status_code=504, detail="search timed out in the queue"
             ) from exc
-        return JSONResponse(content=response.to_dict())
+        return response
 
-    @app.get("/status")
+    @app.get(
+        "/status",
+        tags=["status"],
+        summary="Engine, queue and cache metrics",
+        description=(
+            "Operational counters: how deep the search queue is, how many queries "
+            "are cached, the per-engine circuit-breaker state (failure counts, "
+            "quarantine level and remaining cooldown) and lifetime request "
+            "counters."
+        ),
+        responses={
+            200: {
+                "description": "Current metrics snapshot.",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "queue_depth": 0,
+                            "cached_queries_count": 42,
+                            "metrics": {
+                                "searches_served": 128,
+                                "cache_hits": 96,
+                                "cache_misses": 32,
+                                "circuit_breaker_trips": 2,
+                                "requests_enqueued": 32,
+                            },
+                            "engines": {
+                                "google": {
+                                    "status": "active",
+                                    "fail_count": 0,
+                                    "success_count": 12,
+                                    "total_requests": 12,
+                                    "quarantine_level": 0,
+                                    "quarantined_until": None,
+                                    "remaining_cooldown_seconds": 0,
+                                }
+                            },
+                        }
+                    }
+                },
+            }
+        },
+    )
     async def status(request: Request) -> dict:
         engine_mgr: EngineManager = request.app.state.engines
         service: SearchService = request.app.state.service
@@ -205,4 +357,21 @@ def create_app(
     return app
 
 
+def run() -> None:
+    """Serve the gateway on ``Settings.host``/``Settings.port``.
+
+    ``uvicorn app.main:app`` ignores our settings and uses its own defaults, so
+    ``HOST``/``PORT`` would silently do nothing. This entry point makes the
+    configured values authoritative:
+
+        python -m app.main              # honours HOST and PORT
+    """
+    settings = get_settings()
+    uvicorn.run("app.main:app", host=settings.host, port=settings.port)
+
+
 app = create_app()
+
+
+if __name__ == "__main__":  # pragma: no cover - process entry point
+    run()

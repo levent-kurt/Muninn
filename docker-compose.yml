@@ -10,7 +10,7 @@ services:
     image: muninn:latest
     container_name: muninn
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8000}:8000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-9999}:9999"
     environment:
       # The DB file lives inside the volume; TTL, delays, quarantines and the
       # scrape module are tunable here too (see app/config.py for the list).
@@ -47,7 +47,7 @@ services:
       - /tmp
     healthcheck:
       # python:slim has no curl, so probe with the interpreter itself.
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9999/health/live', timeout=4)"]
       interval: 30s
       timeout: 5s
       retries: 3

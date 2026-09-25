@@ -154,10 +154,12 @@ class Settings:
     # not reachable from the network; docker-compose overrides this to 0.0.0.0
     # because containers must bind all interfaces.
     host: str = field(default_factory=lambda: os.environ.get("HOST", "127.0.0.1"))
-    port: int = field(default_factory=lambda: _env_int("PORT", 8000))
-    # Interactive API docs (/docs, /redoc, /openapi.json). Off by default: the
-    # service is unauthenticated, so its schema should not be published too.
-    docs_enabled: bool = field(default_factory=lambda: _env_bool("DOCS_ENABLED", False))
+    port: int = field(default_factory=lambda: _env_int("PORT", 9999))
+    # Interactive API docs: Swagger UI at /docs, ReDoc at /redoc and the
+    # OpenAPI schema at /openapi.json. On by default because they are the
+    # fastest way to understand the API. The service has no authentication, so
+    # set DOCS_ENABLED=0 anywhere other than a trusted machine.
+    docs_enabled: bool = field(default_factory=lambda: _env_bool("DOCS_ENABLED", True))
 
 
     def browser_launch_args(self) -> list[str]:

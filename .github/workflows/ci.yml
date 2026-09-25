@@ -99,7 +99,7 @@ jobs:
       # healthcheck works in a minimal container.
       - name: Image healthcheck passes
         run: |
-          docker run -d --name muninn-ci -p 8010:8000 muninn:ci
+          docker run -d --name muninn-ci -p 8010:9999 muninn:ci
           for i in $(seq 1 30); do
             state=$(docker inspect -f '{{.State.Health.Status}}' muninn-ci)
             echo "health: $state"

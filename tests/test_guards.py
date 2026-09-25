@@ -20,7 +20,7 @@ from ops.robots import RobotsDeniedError, RobotsGate
 # IP literals: no DNS involved, so these are hermetic.
 BLOCKED_URLS = [
     "http://127.0.0.1/",
-    "http://127.0.0.1:8000/health",
+    "http://127.0.0.1:9999/health",
     "http://localhost/",
     "http://[::1]/",
     "http://10.0.0.5/",

@@ -1,4 +1,4 @@
-"""``GET /health`` and ``GET /health/ready`` endpoints.
+"""Health and status endpoints.
 
 Monitors and reports status for BOTH sides of the gateway:
 
@@ -6,16 +6,19 @@ Monitors and reports status for BOTH sides of the gateway:
   * the scrape side: the HTTP fast-path fetcher and the isolated Stealth
     Browser process pool (worker state, context concurrency, idle timers).
 
-Two endpoints, deliberately:
+Three endpoints, deliberately, because they cost very different amounts:
 
 ``/health/live``
-    Cheap process liveness. No database query, no call into the worker. This is
-    what a container healthcheck should poll, because Docker probes it every few
-    seconds and the deep checks below are not free.
+    Process liveness. No database query, no call into the worker. This is what a
+    container healthcheck should poll, because it runs every few seconds.
 
 ``/health/ready``
-    The full picture, including a live worker probe and a cache count. Suitable
-    for a load balancer or for a human, not for a 5-second heartbeat.
+    Readiness from in-process state only: is the browser up and is at least one
+    search engine usable? No probes, so a load balancer can use it.
+
+``/health``
+    The full picture, including a live worker probe and cache counts. For a
+    human or a dashboard, not for a 5-second heartbeat.
 
 A lazy-starting subprocess worker that has simply not been used yet is a healthy
 state; only an unreachable *external* worker degrades readiness.
@@ -24,7 +27,7 @@ state; only an unreachable *external* worker degrades readiness.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
 
@@ -42,8 +45,53 @@ def _verdict(active: list[str], pool_status: PoolStatus) -> str:
     return "ok"
 
 
-@router.get("/health")
-async def health(request: Request) -> dict:
+@router.get(
+    "/health",
+    summary="Deep health report",
+    description=(
+        "Reports engine quarantine, queue depth, cache size, scrape-cache "
+        "occupancy, rate-limiter state and the browser pool. Performs a live "
+        "worker probe and a database query, so prefer `/health/live` for a "
+        "heartbeat."
+    ),
+    responses={
+        200: {
+            "description": "Full health report.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "ok",
+                        "browser_ready": True,
+                        "queue_depth": 0,
+                        "cache_entries": 42,
+                        "active_engines": ["google", "bing", "ddg", "mojeek"],
+                        "quarantined_engines": [],
+                        "uptime_seconds": 3600,
+                        "fetcher": {
+                            "status": "ok",
+                            "engine": "httpx-fast-path",
+                            "max_body_bytes": 10_000_000,
+                            "per_host_delay": 2.0,
+                        },
+                        "scrape_cache": {"entries": 12, "evictions": 0},
+                        "rate_limiter": {"tracked_clients": 1, "per_minute": 60},
+                        "browser_pool": {
+                            "status": "ok",
+                            "mode": "subprocess",
+                            "detail": "lazy (worker idle-exited)",
+                            "browser_started": False,
+                            "active_contexts": 0,
+                            "max_contexts": 1,
+                            "jobs": 3,
+                            "idle_seconds": 12.5,
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def health(request: Request) -> dict[str, Any]:
     """Deep check: engine pool, worker probe, cache size, queue depth."""
     settings = request.app.state.settings
     engine_mgr = request.app.state.engines
@@ -92,8 +140,23 @@ async def health(request: Request) -> dict:
     }
 
 
-@router.get("/health/live")
-async def health_live(request: Request) -> dict:
+@router.get(
+    "/health/live",
+    summary="Liveness probe",
+    description="Cheap process liveness: no database query and no worker probe. "
+    "This is the endpoint the container healthcheck polls.",
+    responses={
+        200: {
+            "description": "The process is up.",
+            "content": {
+                "application/json": {
+                    "example": {"status": "ok", "uptime_seconds": 3600, "queue_depth": 0}
+                }
+            },
+        }
+    },
+)
+async def health_live(request: Request) -> dict[str, Any]:
     """Cheap liveness for container healthchecks: no I/O beyond the process."""
     service = request.app.state.service
     return {
@@ -103,14 +166,28 @@ async def health_live(request: Request) -> dict:
     }
 
 
-@router.get("/health/ready")
-async def health_ready(request: Request) -> dict:
-    """Readiness: everything /health checks, without the deep probes.
-
-    Answers "should traffic be routed here" using only in-process state, so it
-    stays fast enough for a load balancer while still failing when no search
-    engine is usable.
-    """
+@router.get(
+    "/health/ready",
+    summary="Readiness probe",
+    description="Answers whether traffic should be routed here, using in-process "
+    "state only (browser up, at least one usable search engine). No I/O.",
+    responses={
+        200: {
+            "description": "Readiness verdict.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "ok",
+                        "ready": True,
+                        "active_engines": ["google", "bing", "ddg", "mojeek"],
+                    }
+                }
+            },
+        }
+    },
+)
+async def health_ready(request: Request) -> dict[str, Any]:
+    """Readiness from in-process state, without the deep probes."""
     engine_mgr = request.app.state.engines
     driver = request.app.state.driver
     active = engine_mgr.active_engines()
