@@ -144,3 +144,28 @@ def test_root_metadata(client: TestClient) -> None:
     body = client.get("/").json()
     assert body["service"] == "Muninn API Gateway"
     assert "/search" in body["endpoints"]
+
+def test_health_live_is_cheap_and_ok(client) -> None:
+    """The container healthcheck endpoint: no DB query, no worker probe."""
+    r = client.get("/health/live")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert "queue_depth" in body
+    # The deep report must NOT be inlined here - that is the point of the split.
+    assert "browser_pool" not in body
+
+
+def test_health_ready_reflects_engine_availability(client) -> None:
+    r = client.get("/health/ready")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ready"] is True
+    assert "google" in body["active_engines"]
+
+
+def test_health_reports_scrape_cache_and_rate_limiter(client) -> None:
+    body = client.get("/health").json()
+    assert body["browser_ready"] is True
+    assert body["scrape_cache"]["entries"] >= 0
+    assert body["rate_limiter"]["per_minute"] > 0

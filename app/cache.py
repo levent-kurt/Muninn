@@ -166,3 +166,38 @@ class SearchCache:
             row = await cur.fetchone()
             await cur.close()
         return int(row["n"]) if row is not None else 0
+
+    async def prune(self) -> int:
+        """Delete expired rows and reclaim the file. Returns rows removed.
+
+        Expired rows are already invisible to readers (every read filters on
+        ``expires_at``), but without this the file only ever grows. Call it
+        periodically; the gateway does so on startup and then hourly.
+        """
+        async with self._lock:
+            cur = await self._require_db().execute(
+                "DELETE FROM search_cache WHERE expires_at <= ?", (time.time(),)
+            )
+            removed = cur.rowcount or 0
+            await cur.close()
+            await self._require_db().commit()
+        if removed:
+            # VACUUM reclaims the pages; it cannot run inside a transaction.
+            async with self._lock:
+                await self._require_db().execute("VACUUM")
+            logger.info("pruned %d expired cache row(s)", removed)
+        return removed
+
+    async def start_maintenance(self, interval: float = 3_600.0) -> asyncio.Task[None]:
+        """Background task that prunes hourly until cancelled."""
+
+        async def _loop() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await self.prune()
+                except Exception:  # pragma: no cover - maintenance is best effort
+                    logger.warning("cache prune failed", exc_info=True)
+
+        await self.prune()
+        return asyncio.create_task(_loop(), name="cache-maintenance")

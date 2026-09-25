@@ -82,9 +82,12 @@ class ScrapeService:
         render: int = 0,
         max_text: int | None = None,
     ) -> ScrapeResponse:
+        # Honour the caller's size request, bounded by the configured ceiling.
+        # (Clamping to default_max_text instead would make the endpoint's own
+        # max_text upper bound meaningless.)
         max_text = min(
             max(1, max_text or self._settings.default_max_text),
-            self._settings.default_max_text,
+            self._settings.max_text_cap,
         )
         max_links = self._settings.max_links_cap
         render_flag = 1 if render else 0

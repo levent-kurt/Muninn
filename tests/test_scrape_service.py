@@ -298,3 +298,34 @@ async def test_scrape_pool_unavailable_propagates() -> None:
     service = _service(fetcher, pool)
     with pytest.raises(BrowserPoolUnavailable):
         await service.scrape(CLEAN_PAGE_URL)
+
+async def test_max_text_above_default_is_not_clamped_to_it() -> None:
+    """A caller may ask for more than DEFAULT_MAX_TEXT, up to the cap.
+
+    The service used to clamp every request to default_max_text, which made the
+    endpoint's own max_text upper bound meaningless.
+    """
+    long_page = (
+        "<html><head><title>Long</title></head><body><article>"
+        + "<p>" + ("word " * 60_000) + "</p>"
+        + "</article></body></html>"
+    )
+    fetcher = FakeFetcher({CLEAN_PAGE_URL: _fast(CLEAN_PAGE_URL, long_page)})
+    pool = FakePool()
+    service = _service(fetcher, pool, settings=_settings(default_max_text=1_000, max_text_cap=200_000))
+
+    resp = await service.scrape(CLEAN_PAGE_URL, max_text=50_000)
+    assert len(resp.text) > 1_000, "request was silently clamped to the default"
+
+
+async def test_max_text_is_clamped_to_the_configured_cap() -> None:
+    long_page = (
+        "<html><head><title>Long</title></head><body><article>"
+        + "<p>" + ("word " * 60_000) + "</p>"
+        + "</article></body></html>"
+    )
+    fetcher = FakeFetcher({CLEAN_PAGE_URL: _fast(CLEAN_PAGE_URL, long_page)})
+    service = _service(fetcher, FakePool(), settings=_settings(max_text_cap=2_000))
+
+    resp = await service.scrape(CLEAN_PAGE_URL, max_text=100_000)
+    assert len(resp.text) <= 2_000

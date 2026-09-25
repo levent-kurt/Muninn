@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -55,13 +56,13 @@ class EngineState:
 
     @property
     def active(self) -> bool:
-        return self.quarantined_until is None or self.quarantined_until <= _now()
+        return self.quarantined_until is None or self.quarantined_until <= time.time()
 
     def remaining_cooldown(self) -> int:
         """Seconds left on the current quarantine (0 when active)."""
         if self.quarantined_until is None:
             return 0
-        return max(0, int(self.quarantined_until - _now()))
+        return max(0, int(self.quarantined_until - time.time()))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,9 +74,3 @@ class EngineState:
             "quarantined_until": self.quarantined_until,
             "remaining_cooldown_seconds": self.remaining_cooldown(),
         }
-
-
-def _now() -> float:
-    import time
-
-    return time.time()

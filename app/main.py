@@ -8,10 +8,11 @@ cleanly on exit.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -95,6 +96,7 @@ def create_app(
 
         await service.start()
         await pool.start()
+        maintenance = await cache.start_maintenance()
 
         app.state.settings = settings
         app.state.driver = driver
@@ -111,6 +113,9 @@ def create_app(
 
         await service.stop()
         await pool.stop()
+        maintenance.cancel()
+        with suppress(asyncio.CancelledError):
+            await maintenance
         await driver.stop()
         await fetch.close()
         await cache.close()

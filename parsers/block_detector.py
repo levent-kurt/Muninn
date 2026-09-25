@@ -17,6 +17,7 @@ already-extracted text so it is not computed twice).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 CHALLENGE_MARKERS: tuple[str, ...] = (
@@ -47,6 +48,15 @@ class BlockInfo:
     reason: str | None = None
 
 
+#: Every challenge marker in one case-insensitive pattern. A single regex pass
+#: beats ten substring scans, and it avoids materialising a folded copy of the
+#: body - a scraped page can be up to ``SCRAPE_MAX_BODY_BYTES``.
+_CHALLENGE_RE = re.compile(
+    "|".join(re.escape(marker) for marker in CHALLENGE_MARKERS),
+    re.IGNORECASE,
+)
+
+
 def quick_block(
     html: str | None,
     status: int | None,
@@ -57,10 +67,8 @@ def quick_block(
         return BlockInfo(True, REASON_HTTP)
     if html is None or not html.strip():
         return BlockInfo(True, REASON_EMPTY)
-    lowered = html.lower()
-    for marker in CHALLENGE_MARKERS:
-        if marker in lowered:
-            return BlockInfo(True, REASON_CHALLENGE)
+    if _CHALLENGE_RE.search(html):
+        return BlockInfo(True, REASON_CHALLENGE)
     if render_requested:
         return BlockInfo(True, REASON_RENDER_REQUESTED)
     return BlockInfo(False)

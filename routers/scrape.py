@@ -38,8 +38,8 @@ async def scrape(
         description="1 = force stealth-browser rendering, 0 = fast-path only (unless blocked)",
     ),
     max_text: int = Query(
-        32_000, ge=1, le=32_000,
-        description="Maximum number of body-text characters to return",
+        32_000, ge=1, le=200_000,
+        description="Maximum number of body-text characters to return (server cap: MAX_TEXT_CAP)",
     ),
 ) -> JSONResponse:
     limiter = getattr(request.app.state, "scrape_limiter", None)

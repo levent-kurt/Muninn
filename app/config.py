@@ -84,7 +84,12 @@ class Settings:
 
     # --- Scrape module -----------------------------------------------------
     # Content extraction / response shaping.
+    # default_max_text is what a caller gets when they do not ask for a size;
+    # max_text_cap is the hard ceiling they may ask for (the endpoint's
+    # advertised upper bound). Keeping them separate means a client can request
+    # MORE than the default without the server silently clamping them to it.
     default_max_text: int = field(default_factory=lambda: _env_int("DEFAULT_MAX_TEXT", 32_000))
+    max_text_cap: int = field(default_factory=lambda: _env_int("MAX_TEXT_CAP", 200_000))
     max_links_cap: int = field(default_factory=lambda: _env_int("MAX_LINKS_CAP", 60))
     # Pages whose extracted text is smaller than this (despite a large raw
     # HTML body) are treated as suspicious / blocked.

@@ -128,7 +128,7 @@ class BrowserController:
                 html, final_url, status = await self._render_page(url, goto_timeout_ms)
                 self._jobs += 1
                 return {
-                    "html": html[: self._settings.scrape_max_body_bytes],
+                    "html": _truncate_html(html, self._settings.scrape_max_body_bytes),
                     "final_url": final_url,
                     "status": status,
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
@@ -272,6 +272,21 @@ class BrowserController:
                 os._exit(0)
             logger.info("subprocess worker idle -> exiting (code 0)")
             os._exit(0)
+
+
+def _truncate_html(html: str, max_bytes: int) -> str:
+    """Cap rendered HTML by *encoded* size, not character count.
+
+    ``html[:n]`` bounds characters, so a document of 3-byte characters would
+    pass through at three times the intended size. Encode, cut on a byte
+    boundary, then drop any partial trailing character.
+    """
+    if max_bytes <= 0:
+        return ""
+    encoded = html.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return html
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _reap(tree: list[tuple[int, int]], profiles: set[str]) -> None:

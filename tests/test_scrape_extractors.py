@@ -248,3 +248,20 @@ async def test_fast_path_raises_on_network_error() -> None:
     )
     with pytest.raises(FastPathError):
         await fetcher.fetch("https://example.com/down")
+
+# --------------------------------------------------------------------------- truncation
+
+
+def test_html_truncation_respects_the_byte_cap() -> None:
+    """The cap is in bytes, so multi-byte content must not smuggle past it."""
+    from browser_pool.worker import _truncate_html
+
+    # 3-byte characters: a 10-character slice would be 30 bytes.
+    assert len(_truncate_html("é" * 100, 10).encode("utf-8")) <= 10
+    assert _truncate_html("short", 1000) == "short"
+    assert _truncate_html("abc", 0) == ""
+    # Truncation must not leave a broken partial character behind.
+    out = _truncate_html("€" * 10, 5)
+    # 5 bytes holds exactly one whole euro sign; the second is cut mid-character.
+    assert out == "€"
+    assert len(out.encode("utf-8")) <= 5

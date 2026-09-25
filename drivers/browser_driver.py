@@ -39,6 +39,11 @@ class BrowserDriver:
 
     # -- lifecycle ----------------------------------------------------------
 
+    @property
+    def is_started(self) -> bool:
+        """Whether the persistent browser is up (used by the health router)."""
+        return self._started
+
     async def start(self) -> None:
         """Launch the persistent browser/context and apply stealth hooks."""
         if self._started:

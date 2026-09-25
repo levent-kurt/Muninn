@@ -11,7 +11,11 @@ from tests.html_fixtures import BLOCK_PAGES, ENGINE_RESULTS_HTML
 
 
 class FakeDriver:
-    """Stand-in for BrowserDriver that returns canned HTML per engine."""
+    """Stand-in for BrowserDriver that returns canned HTML per engine.
+
+    Mirrors the real driver's public surface, including ``is_started`` - the
+    health router reads that property, not the private ``_started`` flag.
+    """
 
     def __init__(self, block_engines: set[str] | None = None, all_blocked: bool = False) -> None:
         self._started = False
@@ -24,6 +28,10 @@ class FakeDriver:
 
     async def stop(self) -> None:
         self._started = False
+
+    @property
+    def is_started(self) -> bool:
+        return self._started
 
     @property
     def url_count(self) -> int:
