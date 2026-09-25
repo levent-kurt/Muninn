@@ -1,5 +1,5 @@
 """Unit tests for the /scrape extractors: sitemap, content, block detection,
-and the fast-path fetcher (TODO2 Phase 2)."""
+and the fast-path fetcher."""
 
 from __future__ import annotations
 
@@ -172,18 +172,6 @@ def test_thin_text_rule() -> None:
     # small shell -> no anomaly regardless of text
     assert bd.thin_text_block(html_size_bytes=1_000, text_len=10,
                               html_threshold=20_480, text_threshold=200).blocked is False
-
-
-def test_evaluate_uses_supplied_text_for_thin_rule() -> None:
-    big_shell = "<html>" + " " * 30_000 + "<h1>x</h1></html>"
-    decision = bd.evaluate(
-        big_shell, 200, extracted_text="tiny", html_threshold=20_480, text_threshold=200,
-    )
-    assert decision.blocked is True and decision.reason == bd.REASON_THIN_TEXT
-    clean = bd.evaluate(
-        big_shell, 200, extracted_text="lots" * 1_000, html_threshold=20_480, text_threshold=200,
-    )
-    assert clean.blocked is False
 
 
 # --------------------------------------------------------------------------- fast-path fetcher

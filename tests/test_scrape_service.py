@@ -1,5 +1,4 @@
-"""Tests for per-host politeness, TTL cache, and the scrape orchestrator
-(TODO2 Phase 4). All network legs are stubbed - no real HTTP or Chromium."""
+"""Tests for per-host politeness, TTL cache, and the scrape orchestrator. All network legs are stubbed - no real HTTP or Chromium."""
 
 from __future__ import annotations
 

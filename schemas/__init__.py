@@ -1,3 +1,3 @@
-"""Pydantic schemas for the /scrape module (TODO2)."""
+"""Pydantic schemas for the /scrape module."""
 
 __all__ = ["LinkItem", "ScrapeResponse"]

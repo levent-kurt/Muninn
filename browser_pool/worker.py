@@ -1,4 +1,4 @@
-"""Standalone stealth-browser render worker (TODO2 Phase 3).
+"""Standalone stealth-browser render worker.
 
 Runs in its OWN process, fully decoupled from the API gateway. The only
 interface is a small internal HTTP API:

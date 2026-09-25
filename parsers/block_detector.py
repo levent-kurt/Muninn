@@ -1,4 +1,4 @@
-"""Block & fallback detection engine (TODO2 Phase 2).
+"""Block & fallback detection engine.
 
 Flags a page as blocked/suspect when:
 
@@ -75,27 +75,4 @@ def thin_text_block(
     """Flag pages whose shell is large but whose real content is tiny."""
     if html_size_bytes > html_threshold and text_len < text_threshold:
         return BlockInfo(True, REASON_THIN_TEXT)
-    return BlockInfo(False)
-
-
-def evaluate(
-    html: str | None,
-    status: int | None,
-    *,
-    render_requested: bool = False,
-    extracted_text: str | None = None,
-    html_threshold: int,
-    text_threshold: int,
-) -> BlockInfo:
-    """Full detection pass; pass ``extracted_text`` to skip re-extraction."""
-    decision = quick_block(html, status, render_requested=render_requested)
-    if decision.blocked:
-        return decision
-    if extracted_text is not None:
-        return thin_text_block(
-            len(html or ""),
-            len(extracted_text),
-            html_threshold,
-            text_threshold,
-        )
     return BlockInfo(False)

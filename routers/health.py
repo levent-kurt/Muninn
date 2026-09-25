@@ -1,4 +1,4 @@
-"""``GET /health`` endpoint (TODO2 Phase 5).
+"""``GET /health`` endpoint.
 
 Monitors and reports status for BOTH sides of the gateway:
 

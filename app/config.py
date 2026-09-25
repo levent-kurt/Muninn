@@ -74,7 +74,7 @@ class Settings:
     )
     locale: str = field(default_factory=lambda: os.environ.get("LOCALE", "en-US"))
 
-    # --- Scrape module (TODO2) ---------------------------------------------
+    # --- Scrape module -----------------------------------------------------
     # Content extraction / response shaping.
     default_max_text: int = field(default_factory=lambda: _env_int("DEFAULT_MAX_TEXT", 32_000))
     max_links_cap: int = field(default_factory=lambda: _env_int("MAX_LINKS_CAP", 60))

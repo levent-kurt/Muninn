@@ -1,4 +1,4 @@
-"""Tests for the isolated stealth browser pool (TODO2 Phase 3).
+"""Tests for the isolated stealth browser pool.
 
 The worker's FastAPI app is tested in-process with a fake browser controller;
 the manager's supervision logic (lazy spawn, respawn, idle shutdown, render

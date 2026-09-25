@@ -1,4 +1,4 @@
-"""Supervises the standalone scrape-worker process (TODO2 Phase 3).
+"""Supervises the standalone scrape-worker process.
 
 * **Lazy start** - the worker subprocess is spawned only on the first
   ``render`` call (the worker itself also lazily launches Chromium).

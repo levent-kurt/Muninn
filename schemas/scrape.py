@@ -1,4 +1,4 @@
-"""Request/response schemas for the ``/scrape`` endpoint (TODO2 Phase 1)."""
+"""Request/response schemas for the ``/scrape`` endpoint."""
 
 from __future__ import annotations
 

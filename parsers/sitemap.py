@@ -1,4 +1,4 @@
-"""Sitemap detection and parsing (TODO2 Phase 2).
+"""Sitemap detection and parsing.
 
 A sitemap is identified by its URL shape (``sitemap*.xml``) or by an XML
 content type returned by the server. Parsed ``<loc>`` entries are mapped to
@@ -20,7 +20,7 @@ XML_CONTENT_TYPES = {"text/xml", "application/xml", "application/x-xml"}
 def looks_like_sitemap(url: str, content_type: str | None = None) -> bool:
     """Return True when ``url``/``content_type`` point at a sitemap document.
 
-    Detection rules (TODO2): a ``.xml`` URL extension, or a ``text/xml`` /
+    Detection rules: a ``.xml`` URL extension, or a ``text/xml`` /
     ``application/xml`` content type returned by the server.
     """
     path = urlsplit(url).path.lower()

@@ -1,3 +1,3 @@
-"""API routers for the /scrape module (TODO2 Phase 5)."""
+"""API routers for the /scrape module."""
 
 __all__ = ["scrape", "health"]

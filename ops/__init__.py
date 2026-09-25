@@ -1,3 +1,3 @@
-"""Server-side operations for the /scrape module (TODO2 Phase 4)."""
+"""Server-side operations for the /scrape module."""
 
 __all__ = ["politeness", "cache"]

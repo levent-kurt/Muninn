@@ -1,3 +1,3 @@
-"""Content extractors for the /scrape module (TODO2 Phase 2)."""
+"""Content extractors for the /scrape module."""
 
 __all__ = ["sitemap", "content", "block_detector"]

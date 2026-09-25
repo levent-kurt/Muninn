@@ -33,10 +33,6 @@ class CacheEntry:
     stored_at: float
     expires_at: float
 
-    @property
-    def ttl_seconds_remaining(self) -> int:
-        return max(0, int(self.expires_at - time.time()))
-
 
 class SearchCache:
     """Thread-safe (single asyncio loop) TTL cache backed by SQLite."""
