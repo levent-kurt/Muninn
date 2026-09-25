@@ -65,6 +65,14 @@ class Settings:
             ).split(",")
         )
     )
+    # Chromium's sandbox is a real security boundary; it is off by default only
+    # because it is unreliable inside minimal containers. Running Muninn as root
+    # AND with the sandbox disabled means a browser escape is a host compromise,
+    # so keep BROWSER_NO_SANDBOX=false outside Docker and grant the container the
+    # capabilities Chromium's sandbox needs (see docker-compose.yml).
+    browser_no_sandbox: bool = field(
+        default_factory=lambda: _env_bool("BROWSER_NO_SANDBOX", True)
+    )
     user_agent: str = field(
         default_factory=lambda: os.environ.get(
             "USER_AGENT",
@@ -145,6 +153,14 @@ class Settings:
     # Interactive API docs (/docs, /redoc, /openapi.json). Off by default: the
     # service is unauthenticated, so its schema should not be published too.
     docs_enabled: bool = field(default_factory=lambda: _env_bool("DOCS_ENABLED", False))
+
+
+    def browser_launch_args(self) -> list[str]:
+        """Chromium flags for both browser launch sites."""
+        args = list(self.browser_args)
+        if self.browser_no_sandbox:
+            args.append("--no-sandbox")
+        return args
 
 
 def get_settings() -> Settings:

@@ -47,10 +47,9 @@ class BrowserDriver:
         self._stealth_cm = stealth.use_async(async_playwright())
         self._pw = await self._stealth_cm.__aenter__()
 
-        launch_args = list(self._settings.browser_args) + ["--no-sandbox"]
         self._browser = await self._pw.chromium.launch(
             headless=self._settings.headless,
-            args=launch_args,
+            args=self._settings.browser_launch_args(),
         )
         self._context = await self._browser.new_context(
             user_agent=self._settings.user_agent,

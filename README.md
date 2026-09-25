@@ -1,16 +1,20 @@
-# StealthSearch — Search API Gateway
+# Muninn — self-hosted search & scrape gateway
 
-`StealthSearch` is a lightweight, dockerized **Search API Gateway** for a home
-PC (see `SPEC.md`). It exposes a clean REST API for web searches while a
-single persistent, anti-bot-hardened Chromium instance scrapes **Google**,
-**Bing**, **DuckDuckGo**, and **Mojeek** for you — rotating engines, throttling
-traffic, and auto-quarantining blocked engines behind the scenes.
+Muninn is a lightweight, dockerized **search and scraping API** for a home
+server. It exposes a clean REST API for web searches while a single persistent,
+anti-bot-hardened Chromium scrapes **Google**, **Bing**, **DuckDuckGo** and
+**Mojeek** for you — rotating engines, throttling traffic, and auto-quarantining
+blocked engines behind the scenes.
 
-It also ships a **`/scrape` module**: fetch any URL quickly over plain HTTP
-(TODO2 `fast-path`), automatically escalate to an isolated stealth-browser
-process pool when a site blocks or challenges the request (or when
-`render=1` is requested), and receive clean text, metadata, and links — with
-per-host politeness and a URL-keyed TTL cache.
+It also ships a **`/scrape` module**: fetch any URL over plain HTTP, escalate to
+an isolated stealth-browser process when a site blocks or challenges the request
+(or when you ask for it), and get back clean text, metadata and links — with
+per-host politeness and a bounded TTL cache.
+
+> **Single-user, self-hosted, no authentication.** Muninn binds to `127.0.0.1` by
+> default and has no auth on any endpoint. See [Security](#security) before
+> exposing it to a network you do not control, and read
+> [Legal & ethical use](#legal--ethical-use) first.
 
 ```
 [ Client Scripts ]  →  GET /search
@@ -25,203 +29,160 @@ per-host politeness and a URL-keyed TTL cache.
 ┌─────────────────────────────────────────────────────────┐
 │ Engine Manager & Circuit Breaker                        │
 │   └── Round-Robin rotation, quarantine 30m → 12h        │
+│   └── State persisted to SQLite (survives restarts)     │
 └──────────────────────────┬──────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────┐
 │ Driver Layer (playwright-stealth)                       │
 │   └── Persistent Chromium BrowserContext                │
 │        ├── Google / Bing / DuckDuckGo / Mojeek parsers  │
+└──────────────────────────┬──────────────────────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│ /scrape module (separate worker process)                │
+│   fast-path HTTP → block detect → stealth browser       │
+│   SSRF guard · robots.txt · rate limit · politeness     │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 1. System dependency installation
+## Contents
+
+1. [Install](#1-install)
+2. [Run](#2-run)
+3. [API](#3-api)
+4. [Configuration](#4-configuration)
+5. [How it works](#5-how-it-works)
+6. [Security](#6-security)
+7. [Legal & ethical use](#7-legal--ethical-use)
+8. [Development](#8-development)
+9. [Project layout](#9-project-layout)
+
+---
+
+## 1. Install
+
+**Platforms:** Linux and macOS. Muninn uses POSIX process groups, `setsid` and
+`pgrep`/`ps` to tear its browser down without leaving orphans, so **Windows is
+not supported**.
+
+**Python 3.10+** (3.12 recommended).
 
 ### macOS (Homebrew)
 
 ```bash
-# 1. Python 3.10+ (3.12 recommended)
 brew install python@3.12
 
-# 2. Project (uses a venv; Chromium is downloaded by Playwright, no brew needed)
-cd search_api
+git clone https://github.com/leventkurt/muninn.git
+cd muninn
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-
-# 3. Chromium browser binaries
-python -m playwright install chromium
+make install         # or: pip install -r requirements.txt
+make browsers        # download the pinned Chromium build
 ```
 
-> macOS note: the first browser launch may ask to accept incoming network
-> connections for the Chromium helper; allow it.
+> The first browser launch may ask to accept incoming network connections for
+> the Chromium helper; allow it.
 
 ### Ubuntu / Debian (Linux)
 
 ```bash
-# 1. Python 3.10+ (3.12 recommended)
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv python3-pip
+sudo apt-get update
+sudo apt-get install -y python3.12 python3.12-venv
+python3 -m playwright install-deps chromium   # or: make browsers
 
-# 2. Project
-cd search_api
+git clone https://github.com/leventkurt/muninn.git
+cd muninn
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-
-# 3. Chromium + every system library Playwright needs
-python -m playwright install --with-deps chromium
+make install
 ```
 
 ### Docker (any OS)
 
-If you only need the container, install [Docker](https://docs.docker.com/get-docker/)
-(Compose included) and skip the Python steps — the `Dockerfile` installs Python
-and Chromium with all dependencies for you.
+```bash
+git clone https://github.com/leventkurt/muninn.git
+cd muninn
+docker compose up -d
+```
+
+This starts two containers from one image: `muninn` (the API, published on
+`127.0.0.1:8000`) and `scrape-worker` (the browser pool, reachable only on the
+internal network).
 
 ---
 
-## 2. Running the service
+## 2. Run
 
-### Locally with Python
-
-```bash
-source .venv/bin/activate
-python -m playwright install chromium        # once
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Or with a one-line env override (see the table below):
+### Locally
 
 ```bash
-THROTTLE_MIN_DELAY=15 THROTTLE_MAX_DELAY=30 uvicorn app.main:app --port 8000
+make run      # uvicorn with reload on 127.0.0.1:8000
 ```
 
-The API is then at `http://localhost:8000`, docs at
-`http://localhost:8000/docs`.
-
-### With Docker Compose (recommended)
+### With Docker Compose
 
 ```bash
-docker compose up --build -d
-docker compose logs -f stealthsearch        # watch it boot the browser
-docker compose ps                           # stealthsearch + scrape-worker
-curl http://localhost:8000/health           # "status": "ok"
+docker compose up -d --build
+docker compose logs -f muninn
+docker compose ps
 ```
 
-The SQLite cache is persisted in `./data/cache.db` (bind-mounted volume), so
-cached queries survive container restarts. Two containers run: `stealthsearch`
-(the API) and `scrape-worker` (the isolated stealth-browser render process,
-supervised with `restart: always`; see `SCRAPE_WORKER_MODE=external`).
+`GET /health` returns `{"status": "ok", ...}` when both the browser and the
+scrape pool are healthy. Cached queries survive restarts in `./data`.
+
+> The compose stack runs the containers as an **unprivileged user** with a
+> read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`.
 
 ---
 
-## 3. API usage
+## 3. API
+
+Interactive docs are **off by default** because the service is unauthenticated.
+Set `DOCS_ENABLED=1` locally, then browse `http://127.0.0.1:8000/docs`.
 
 ### `GET /search` — execute a search
 
-| Parameter      | Type    | Required | Default | Description                                  |
-|----------------|---------|----------|---------|----------------------------------------------|
-| `q`            | string  | yes      | —       | The query string                             |
-| `max_results`  | int     | no       | `10`    | Max organic results to yield (1–50)          |
-| `engine`       | string  | no       | —       | Preferred engine `google|bing|ddg|mojeek`    |
-| `force_refresh`| boolean | no       | `false` | Bypass the cache                             |
-
-**cURL**
+| Parameter        | Type    | Default | Notes                                    |
+|------------------|---------|---------|------------------------------------------|
+| `q`              | string  | —       | required, 1–500 chars                    |
+| `max_results`    | int     | `10`    | 1–50                                     |
+| `engine`         | string  | —       | `google` \| `bing` \| `ddg` \| `mojeek`  |
+| `force_refresh`  | bool    | `false` | bypass the cache for the read           |
 
 ```bash
-curl "http://localhost:8000/search?q=python+web+scraping&max_results=5"
-curl "http://localhost:8000/search?q=python+web+scraping&engine=bing"
-curl "http://localhost:8000/search?q=python+web+scraping&force_refresh=true"
+curl "http://127.0.0.1:8000/search?q=python+web+scraping&max_results=5"
 ```
-
-**Python (`requests`)**
-
-```python
-import requests
-
-resp = requests.get(
-    "http://localhost:8000/search",
-    params={"q": "python web scraping", "max_results": 5, "engine": "ddg"},
-    timeout=180,          # requests wait in the throttled queue
-)
-data = resp.json()
-print(data["engine_used"], data["cached"], data["results_count"])
-for r in data["results"]:
-    print("-", r["title"], "|", r["url"])
-```
-
-**Response (`200 OK`)**
 
 ```json
 {
   "query": "python web scraping",
-  "engine_used": "bing",
+  "engine_used": "google",
   "cached": false,
-  "execution_time_ms": 1820,
+  "execution_time_ms": 22140,
   "results_count": 5,
   "results": [
-    {
-      "title": "Web Scraping with Python - Full Tutorial",
-      "url": "https://example.com/python-scraping",
-      "snippet": "Learn how to parse HTML and handle web requests using Python..."
-    }
+    {"title": "...", "url": "https://...", "snippet": "..."}
   ]
 }
 ```
 
-> **Why does `/search` take 15–30 seconds?** Every cache-miss is serialized
-> behind a randomized 15–30 s throttle to keep a residential IP safe. Identical
-> queries are served instantly from the cache (default TTL 24 h).
-
-**Error responses**
-
-| Code | When                                                        |
-|------|-------------------------------------------------------------|
-| 422  | Missing `q`, or unknown `engine`                            |
-| 503  | Every engine is quarantined (`all_engines_quarantined`)     |
-| 504  | Request waited longer than `REQUEST_TIMEOUT_SECONDS`        |
+Status codes: `200` ok · `422` bad parameters · `503` every engine quarantined ·
+`504` timed out in the queue.
 
 ### `GET /scrape` — fetch + extract a page
 
-Fetches a URL, extracts clean main text, metadata, and links. A fast plain-HTTP
-leg handles normal pages; when the fast-path looks blocked (403/429/503,
-Cloudflare/challenge markers, a large shell with almost no text) — or when you
-pass `render=1` — the request escalates to the isolated stealth-browser pool.
-
-| Parameter  | Type   | Required | Default | Description                                      |
-|------------|--------|----------|---------|--------------------------------------------------|
-| `url`      | `HttpUrl` | yes   | —       | Target page URL (`http`/`https`)                 |
-| `render`   | int    | no       | `0`     | `1` = force browser rendering, `0` = fast-path first |
-| `max_text` | int    | no       | `32000` | Max body-text characters to return (1–32000)     |
-
-**cURL**
+| Parameter  | Type | Default | Notes                                              |
+|------------|------|---------|----------------------------------------------------|
+| `url`      | url  | —       | required, `http(s)` only                            |
+| `render`   | 0/1  | `0`     | `1` forces the stealth browser                     |
+| `max_text` | int  | `32000` | 1–32000 body-text characters                        |
 
 ```bash
-curl "http://localhost:8000/scrape?url=https://example.com"
-curl "http://localhost:8000/scrape?url=https://example.com&render=1"
-curl "http://localhost:8000/scrape?url=https://example.com&max_text=5000"
+curl "http://127.0.0.1:8000/scrape?url=https://example.com"
+curl "http://127.0.0.1:8000/scrape?url=https://example.com&render=1"
 ```
-
-**Python (`requests`)**
-
-```python
-import requests
-
-resp = requests.get(
-    "http://localhost:8000/scrape",
-    params={"url": "https://example.com", "render": 1},
-    timeout=120,
-)
-data = resp.json()
-print(data["title"], "| rendered:", data["rendered"], "| blocked:", data["block_suspected"])
-print(data["text"][:300])
-for link in data["links"][:5]:
-    print("-", link["anchor_text"] or link["url"], "| same_domain:", link["same_domain"])
-```
-
-**Response (`200 OK`)**
 
 ```json
 {
@@ -229,11 +190,9 @@ for link in data["links"][:5]:
   "final_url": "https://example.com/",
   "status": 200,
   "title": "Example Domain",
-  "meta_description": "Example Domain description.",
-  "text": "Example Domain. This domain is for use in illustrative examples...",
-  "links": [
-    {"url": "https://example.com/iana", "anchor_text": "IANA", "same_domain": false}
-  ],
+  "meta_description": "...",
+  "text": "Example Domain ...",
+  "links": [{"url": "https://example.com/more", "anchor_text": "More", "same_domain": true}],
   "rendered": false,
   "block_suspected": false,
   "cached": false,
@@ -242,187 +201,210 @@ for link in data["links"][:5]:
 }
 ```
 
-* `cached: true` means the result was served from the URL-keyed TTL cache;
-  `age_seconds` then tells you how old the cached copy is.
-* `rendered: true` means the page was extracted from a real stealth-browser
-  render (fast-path was blocked or `render=1` was requested).
-* `block_suspected: true` means the *final* page (fast-path or rendered) still
-  looks like a challenge/block page.
-* URLs ending in `.xml` (or servers answering `text/xml` /
-  `application/xml`) are treated as **sitemaps**: `<loc>` entries are returned
-  as `links` immediately, skipping rendering and text extraction.
+Status codes: `200` ok · `400` target rejected by the SSRF guard · `403`
+disallowed by `robots.txt` · `422` bad parameters · `429` rate limited (with
+`Retry-After`) · `502` fast-path fetch failed · `503` browser pool unavailable.
 
-**Error responses**
-
-| Code | When                                                        |
-|------|-------------------------------------------------------------|
-| 422  | Missing/invalid `url`, or `render` / `max_text` out of range |
-| 502  | Fast-path HTTP fetch failed (DNS/TLS/timeout)               |
-| 503  | Stealth browser pool unreachable / worker down              |
+```python
+import httpx
+r = httpx.get("http://127.0.0.1:8000/scrape", params={"url": "https://example.com"})
+print(r.json()["title"])
+```
 
 ### `GET /health` — liveness
 
-```bash
-curl http://localhost:8000/health
-```
+Reports the search driver, engine quarantine list, queue depth, cache size and
+the scrape pool state. A lazy worker that has not been used yet is **healthy**.
 
-```json
-{
-  "status": "ok",
-  "browser_ready": true,
-  "queue_depth": 0,
-  "cache_entries": 142,
-  "active_engines": ["google", "bing", "ddg", "mojeek"],
-  "quarantined_engines": [],
-  "uptime_seconds": 3600,
-  "fetcher": {
-    "status": "ok",
-    "engine": "httpx-fast-path",
-    "max_body_bytes": 10000000,
-    "per_host_delay": 2.0
-  },
-  "browser_pool": {
-    "status": "ok",
-    "mode": "subprocess",
-    "detail": "lazy (not started)",
-    "browser_started": false,
-    "active_contexts": 0,
-    "max_contexts": 1,
-    "jobs": 0,
-    "idle_seconds": 0.0
-  }
-}
-```
+### `GET /status` — metrics
 
-`fetcher.*` reports the scrape fast-path HTTP client;
-`browser_pool.*` reports the isolated stealth-browser worker process — its
-mode (`subprocess` = the API spawns it on demand, `external` = a separate
-supervised service), whether Chromium is currently running, how many of the
-`max_contexts` job slots are active, and how long since the last render job.
-
-### `GET /status` — quarantine + metrics dashboard
-
-```bash
-curl http://localhost:8000/status
-```
-
-```json
-{
-  "queue_depth": 3,
-  "cached_queries_count": 142,
-  "metrics": {
-    "searches_served": 87,
-    "cache_hits": 61,
-    "cache_misses": 26,
-    "circuit_breaker_trips": 1,
-    "requests_enqueued": 26
-  },
-  "engines": {
-    "google": {"status": "active", "fail_count": 0, "success_count": 20, "quarantine_level": 0},
-    "bing":  {"status": "quarantined", "fail_count": 1, "remaining_cooldown_seconds": 1700, "quarantine_level": 1},
-    "ddg":   {"status": "active", "fail_count": 0, "success_count": 18, "quarantine_level": 0},
-    "mojeek": {"status": "active", "fail_count": 0, "success_count": 12, "quarantine_level": 0}
-  }
-}
-```
+Queue depth, cache entry count, per-engine state and request counters.
 
 ---
 
 ## 4. Configuration
 
-All settings are environment variables, defined in `app/config.py`.
+Everything is an environment variable; the full list with defaults lives in
+`app/config.py`.
 
-| Variable                           | Default      | Description                                              |
-|------------------------------------|--------------|----------------------------------------------------------|
-| `THROTTLE_MIN_DELAY`               | `15`         | Min seconds between outbound searches                    |
-| `THROTTLE_MAX_DELAY`               | `30`         | Max seconds between outbound searches (`random.uniform`) |
-| `QUARANTINE_FIRST_SECONDS`         | `1800`       | 1st 429/CAPTCHA → quarantine (30 min)                    |
-| `QUARANTINE_ESCALATED_SECONDS`     | `43200`      | 2nd consecutive failure → quarantine (12 h)              |
-| `CACHE_TTL_SECONDS`                | `86400`      | Cache TTL for identical queries (24 h; spec allows 48 h) |
-| `CACHE_DB_PATH`                    | `data/cache.db` | SQLite database path (use `:memory:` to disable disk)  |
-| `DEFAULT_MAX_RESULTS`              | `10`         | Default value for `max_results`                          |
-| `MAX_MAX_RESULTS`                  | `50`         | Hard cap for `max_results`                               |
-| `REQUEST_TIMEOUT_SECONDS`          | `120`        | Max time a `/search` waits in the queue                  |
-| `HEADLESS`                         | `true`       | Run Chromium headless                                    |
-| `PAGE_LOAD_TIMEOUT_MS`             | `45000`      | Per-page load budget                                     |
-| `NAVIGATION_TIMEOUT_MS`            | `60000`      | `page.goto` timeout                                      |
-| `USER_AGENT`                       | Chrome UA    | Override the browser user agent                          |
-| `LOCALE`                           | `en-US`      | Browser locale                                           |
-| `BROWSER_ARGS`                     | `--disable-blink-features=AutomationControlled` | Extra Chromium flags (comma-separated) |
-| `DEFAULT_MAX_TEXT`                 | `32000`      | Default cap on `/scrape` extracted text chars   |
-| `MAX_LINKS_CAP`                    | `60`         | Max links returned per `/scrape` response       |
-| `TEXT_MIN_CHAR_THRESHOLD`          | `200`        | Text below this (on a large HTML shell) → block-suspect flag |
-| `TEXT_ANOMALY_HTML_BYTES`          | `20480`      | HTML size above which the thin-text rule applies |
-| `PER_HOST_DELAY_SECONDS`           | `2.0`        | Min gap between requests to the same hostname   |
-| `SCRAPE_CACHE_TTL`                 | `3600`       | URL-keyed `/scrape` result cache TTL (seconds)  |
-| `SCRAPE_FAST_PATH_TIMEOUT`         | `20.0`       | Fast-path HTTP read timeout                     |
-| `SCRAPE_MAX_BODY_BYTES`            | `10000000`   | Hard cap on fetched/rendered HTML size (bytes)  |
-| `BROWSER_IDLE_TIMEOUT`             | `300`        | Shut down the scrape browser after N idle seconds |
-| `BROWSER_MAX_CONTEXTS`             | `1`          | Max concurrent scrape browser contexts (1–2)    |
-| `SCRAPE_RENDER_TIMEOUT`            | `45.0`       | Max seconds a single render job may take        |
-| `SCRAPE_WORKER_MODE`               | `subprocess` | `subprocess` (API spawns/supervises) or `external` (own service) |
-| `SCRAPE_WORKER_URL`                | *(derived)*  | External worker base URL, e.g. `http://scrape-worker:8765` |
-| `SCRAPE_WORKER_HOST` / `_PORT`     | `127.0.0.1` / `8765` | Where the subprocess worker binds        |
-| `SCRAPE_WORKER_STARTUP_TIMEOUT`    | `30.0`       | Max seconds to wait for a spawned worker to boot |
+### Core
+
+| Variable | Default | Description |
+|---|---|---|
+| `HOST` | `127.0.0.1` | Bind address (compose sets `0.0.0.0`) |
+| `PORT` | `8000` | Bind port |
+| `DOCS_ENABLED` | `false` | Publish `/docs`, `/redoc`, `/openapi.json` |
+| `CACHE_DB_PATH` | `data/cache.db` | SQLite path (`:memory:` disables disk) |
+| `CACHE_TTL_SECONDS` | `86400` | Search cache TTL |
+| `THROTTLE_MIN_DELAY` | `15` | Min seconds between outbound searches |
+| `THROTTLE_MAX_DELAY` | `30` | Max seconds between outbound searches |
+| `QUARANTINE_FIRST_SECONDS` | `1800` | 1st 429/CAPTCHA → quarantine |
+| `QUARANTINE_ESCALATED_SECONDS` | `43200` | 2nd consecutive failure → quarantine |
+| `DEFAULT_MAX_RESULTS` / `MAX_MAX_RESULTS` | `10` / `50` | `max_results` default and cap |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Max time `/search` waits in the queue |
+
+### Browser
+
+| Variable | Default | Description |
+|---|---|---|
+| `HEADLESS` | `true` | Run Chromium headless |
+| `BROWSER_ARGS` | `--disable-blink-features=AutomationControlled` | Extra Chromium flags (comma-separated) |
+| `BROWSER_NO_SANDBOX` | `true` | Adds `--no-sandbox`. Set `false` to keep Chromium's sandbox |
+| `PAGE_LOAD_TIMEOUT_MS` | `45000` | Per-page load budget |
+| `NAVIGATION_TIMEOUT_MS` | `60000` | `page.goto` timeout |
+| `USER_AGENT` / `LOCALE` | Chrome UA / `en-US` | Browser identity |
+
+### Scrape module
+
+| Variable | Default | Description |
+|---|---|---|
+| `SCRAPE_WORKER_MODE` | `subprocess` | `subprocess` (API supervises) or `external` (own service) |
+| `SCRAPE_WORKER_URL` | *(derived)* | External worker base URL |
+| `SCRAPE_WORKER_HOST` / `_PORT` | `127.0.0.1` / `8765` | Where the spawned worker binds |
+| `SCRAPE_WORKER_STARTUP_TIMEOUT` | `30.0` | Seconds to wait for a spawned worker |
+| `SCRAPE_WORKER_LOG_FILE` | `data/scrape-worker.log` | Worker log destination |
+| `BROWSER_IDLE_TIMEOUT` | `300` | Shut the scrape browser down after N idle seconds |
+| `BROWSER_MAX_CONTEXTS` | `1` | Concurrent scrape browser contexts |
+| `SCRAPE_RENDER_TIMEOUT` | `45.0` | Max seconds per render job |
+| `SCRAPE_FAST_PATH_TIMEOUT` | `20.0` | Fast-path HTTP read timeout |
+| `SCRAPE_MAX_BODY_BYTES` | `10000000` | Hard cap on fetched/rendered HTML |
+| `DEFAULT_MAX_TEXT` | `32000` | Default extracted-text cap |
+| `MAX_LINKS_CAP` | `60` | Max links per response |
+| `TEXT_MIN_CHAR_THRESHOLD` | `200` | Below this (on a large shell) → block-suspect |
+| `TEXT_ANOMALY_HTML_BYTES` | `20480` | HTML size where the thin-text rule applies |
+| `SCRAPE_CACHE_TTL` | `3600` | Scrape cache TTL |
+| `SCRAPE_CACHE_MAX_ENTRIES` | `2000` | Scrape cache size bound (LRU) |
+| `PER_HOST_DELAY_SECONDS` | `2.0` | Min gap between requests to one hostname |
+| `POLITENESS_IDLE_EVICT_SECONDS` | `300` | Forget a host's politeness state after N idle seconds |
+
+### Safety guards
+
+| Variable | Default | Description |
+|---|---|---|
+| `SCRAPE_ALLOW_PRIVATE_TARGETS` | `false` | Allow loopback/private/link-local targets (**dangerous**) |
+| `SCRAPE_ALLOWED_HOSTS` | *(empty)* | Comma-separated allowlist that replaces the network rules (supports `*.suffix`) |
+| `SCRAPE_RESPECT_ROBOTS` | `true` | Check each target's `robots.txt` (fails open if unreachable) |
+| `SCRAPE_RATE_LIMIT_PER_MINUTE` | `60` | Per-client `/scrape` budget; excess returns `429` |
 
 Example at scale — a daily budget of ~650 requests at ~22.5 s average spacing
-maps to roughly 16 h of active scraping; the throttler + 24 h cache are sized
+maps to roughly 16 h of active searching; the throttler and 24 h cache are sized
 for that workload.
 
 ---
 
 ## 5. How it works
 
-* **Persistent browser** — one Chromium is launched at startup
-  (`drivers/browser_driver.py`); every search opens and closes a *page* in the
-  same `BrowserContext`. No per-request browser spawns (verified by
-  `scripts/live_probe.py`, which confirms the context object is reused and RSS
-  stays flat).
-* **Stealth** — `playwright-stealth` evasions are applied to every page.
-* **Round-Robin rotation** — `app/engine_manager.py` picks engines in a
-  round-robin across *active* engines; quarantined engines are skipped.
-* **Circuit breaker** — a 429 or CAPTCHA quarantines an engine for 30 minutes;
-  a repeat failure after cooldown escalates to 12 hours. Success resets the
-  counter. If every engine is quarantined, `/search` returns **503**.
-* **Throttling** — cache-misses go through an `asyncio.Queue` drained by a
-  single worker enforcing `random.uniform(15, 30)` between outbound fetches.
-* **Caching** — queries are normalized (`q.strip().lower()`) and SHA-256-hashed
-  into SQLite (`app/cache.py`); identical queries return instantly until TTL
-  expiry. `force_refresh=true` bypasses the lookup.
+**Search.** Every uncached query becomes a job on a FIFO queue drained by a
+single worker, which enforces a randomized delay between outbound requests. The
+engine manager rotates engines round-robin; a 429 or CAPTCHA quarantines that
+engine (30 min, then 12 h for consecutive failures) and the job retries on the
+next active one. Quarantine state is written to SQLite, so restarting the
+service does not immediately re-hammer an engine that just blocked you. All
+four engines share one persistent Chromium context; each request gets a fresh
+page that is closed afterwards.
 
-### How the `/scrape` module works
+**Scrape.** For each target:
 
-* **Pipeline** — for each request: check the URL-keyed TTL cache →
-  acquire the per-host politeness slot → fast-path HTTP fetch (redirects
-  tracked) → sitemap? parse `<loc>` and return → evaluate the block detector →
-  clean? extract text/links → blocked or `render=1`? escalate to the stealth
-  browser pool → save to cache.
-* **Fast-path** — `httpx` with browser-like headers, bounded body reads, and
-  `final_url` from redirect tracking (`fetchers/fast_path.py`).
-* **Extraction** — `trafilatura.extract` for clean main text (capped at
-  `DEFAULT_MAX_TEXT`), BeautifulSoup/lxml for title, meta description, and
-  resolved/deduplicated/capped links with `same_domain` flags.
-* **Block detector** — 403/429/503, Cloudflare/challenge markers, a > 20 KB
-  shell with < 200 chars of text, or an explicit `render=1` all force the
-  browser leg (`parsers/block_detector.py`).
-* **Isolated browser pool** — the worker runs as its **own process**
-  (`python -m browser_pool.worker`) speaking a tiny internal HTTP API
-  (`GET /ping`, `POST /render`). Chromium is lazy-started on the first render,
-  every job gets a **fresh context+page destroyed immediately after** (no
-  state leaks), concurrency is capped at `BROWSER_MAX_CONTEXTS` (1–2), and the
-  browser shuts down after `BROWSER_IDLE_TIMEOUT` idle seconds. The pool
-  manager lazily spawns/supervises the worker (`subprocess` mode) or calls a
-  separately supervised service (`external` mode, used by docker-compose with
-  `restart: always`), respawning it once if it dies mid-job.
-* **Politeness** — `ops/politeness.py` enforces a per-host lock + mandatory
-  `PER_HOST_DELAY_SECONDS` gap before each outbound fast-path/render leg.
+1. **Guards** — SSRF validation (scheme, resolved addresses) and the
+   `robots.txt` policy run *before* the cache lookup, so a target that has since
+   become disallowed is not served from cache.
+2. **Cache** — keyed by URL *and* render flag, so `render=1` is never answered
+   from a fast-path entry. Bounded LRU.
+3. **Politeness** — one in-flight request per hostname, with a minimum gap.
+4. **Fast path** — plain HTTP with browser-like headers, redirects followed, body
+   read under a hard byte cap.
+5. **Sitemap?** — `.xml` or `text/xml` targets return their `<loc>` entries
+   without a render pass.
+6. **Block detection** — status codes, challenge markers, and the "large shell,
+   almost no text" heuristic. Also triggers on `render=1`.
+7. **Extraction** — trafilatura for body text, BeautifulSoup for the title,
+   description and resolved links (the document is parsed once).
+8. **Escalation** — a blocked or forced-render target goes to the browser pool,
+   then steps 6–7 run again on the rendered HTML.
 
-## 6. Verification
+**The browser worker** is a separate process. Chromium starts lazily, every job
+gets a fresh browser context (so no cookies or DOM state carry between sites),
+and after `BROWSER_IDLE_TIMEOUT` the worker closes the browser and exits
+cleanly. Its idle shutdown is deterministic: it snapshots its process tree
+before teardown, then a detached reaper SIGKILLs the node driver and every
+Chromium process — including any that detached into their own process group — so
+a stop never leaves browser processes behind.
+
+---
+
+## 6. Security
+
+Muninn is **unauthenticated by design**: it is a single-user service, and
+building a half-working auth layer would be worse than being explicit about the
+boundary. The defaults are therefore safe rather than secure-but-surprising:
+
+- binds **`127.0.0.1`** (and compose publishes the port to `127.0.0.1`);
+- **`/docs`, `/redoc` and `/openapi.json` are disabled** unless
+  `DOCS_ENABLED=1`;
+- containers run as a **non-root user** with a read-only root filesystem,
+  `cap_drop: ALL` and `no-new-privileges`.
+
+What the code *does* enforce:
+
+- **SSRF guard** — `/scrape` refuses loopback, link-local (including
+  `169.254.169.254`), private, multicast and reserved addresses, and rejects
+  non-`http(s)` schemes. Enforced in the API *and* again in the worker. DNS
+  rebinding is a documented limitation, not an oversight.
+- **`robots.txt` policy** for scrape targets, on by default.
+- **Rate limiting** on `/scrape` with bounded per-client state.
+- **Bounded memory** — capped response bodies, LRU caches, swept politeness
+  state.
+- **No orphaned browsers** on shutdown.
+
+Read [`SECURITY.md`](SECURITY.md) for the full threat model, the escape hatches,
+and a hardening checklist before exposing Muninn anywhere.
+
+---
+
+## 7. Legal & ethical use
+
+**Please read this before you deploy Muninn.**
+
+Muninn automates access to third-party websites, including search engines whose
+terms of service may prohibit automated access. Deploying it means **you** are
+the one making requests, from **your** IP address, to sites you do not control.
+
+- You are responsible for complying with each target's terms of service,
+  `robots.txt`, rate limits, and any applicable law (including data-protection
+  and copyright rules where you live). Neither the project nor the maintainer
+  can do that for you.
+- The default configuration is tuned for **personal, low-volume use on your own
+  hardware**. The throttler and cache exist to keep a residential IP well below
+  any quota; do not remove them to go faster.
+- Muninn's `/scrape` module **respects `robots.txt` by default**
+  (`SCRAPE_RESPECT_ROBOTS=true`). Turning that off is your decision and your
+  responsibility.
+- Do not use Muninn to circumvent access controls you are not authorised to
+  bypass, to access systems you are not authorised to access, or to collect
+  personal data without a lawful basis.
+- The maintainer provides the software as-is, with no warranty
+  (see [`LICENSE`](LICENSE)), and accepts no liability for how you use it.
+
+**Not a goal of this project:** operating at scale, defeating detection systems,
+or building a multi-user scraping service. If you need those, build them
+yourself.
+
+---
+
+## 8. Development
 
 ```bash
-# Unit + API tests (no network)
-pytest
+make install     # runtime + dev dependencies
+make browsers    # pinned Chromium
+make check       # ruff + mypy + pytest, exactly what CI runs
+make format      # auto-fix lint and formatting
+make run         # local dev server with reload
+```
 
+The suite is **offline and fast** (~160 tests, a couple of seconds): no test
+touches the network or launches a real browser.
+
+```bash
 # 100+ simulated requests through the full pipeline (fake driver, no network)
 python scripts/batch_smoke.py
 
@@ -430,24 +412,33 @@ python scripts/batch_smoke.py
 LIVE=1 python scripts/live_probe.py "python web scraping"
 ```
 
-## 7. Project layout
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow, and
+[`CHANGELOG.md`](CHANGELOG.md) for what changed.
+
+---
+
+## 9. Project layout
 
 ```
-app/                      FastAPI gateway, config, cache, engine manager, queue
-drivers/                  playwright-stealth browser driver + engine parsers
-schemas/                  Pydantic models for the /scrape module (LinkItem, ScrapeResponse)
-parsers/                  sitemap parser + content extractor + block detector
+app/                      FastAPI gateway, config, search cache, engine manager, queue
+drivers/                  playwright-stealth browser driver + per-engine parsers
+schemas/                  Pydantic models for /scrape (LinkItem, ScrapeResponse)
+parsers/                  sitemap parser, content extractor, block detector
 fetchers/                 fast-path (plain HTTP) fetcher
-browser_pool/             standalone stealth-browser worker process + pool manager
-ops/                      per-host politeness + URL-keyed TTL scrape cache
+browser_pool/             stealth-browser worker process + supervising manager
+ops/                      politeness, scrape cache, SSRF guard, robots, rate limit
 services/                 scrape pipeline orchestrator
-routers/                  /scrape + /health FastAPI routers
-scripts/                  batch smoke test and live probe/benchmark
+routers/                  /scrape and /health FastAPI routers
+scripts/                  offline batch smoke test and opt-in live probe
 tests/                    unit + API integration tests
-data/                     SQLite cache volume (gitignored)
-Dockerfile                Python + Chromium runtime image
+data/                     SQLite cache and worker log (gitignored)
+Dockerfile                Python + Chromium runtime image (non-root)
 docker-compose.yml        API + scrape-worker deployment
-requirements.txt          Python dependencies
-SPEC.md / TODO.md         design spec and phase-by-phase roadmap
-TODO2.md                  /scrape module phase-by-phase roadmap
+Makefile                  install / lint / typecheck / test / run targets
+pyproject.toml            project metadata, ruff, mypy and pytest configuration
 ```
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). You may use, modify and redistribute this
+software, including commercially, with attribution.

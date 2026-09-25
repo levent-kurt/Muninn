@@ -1,4 +1,8 @@
-version: "3.9"
+# Muninn - API gateway + isolated stealth-browser scrape worker.
+#
+# Two containers from one image: the API talks to the worker over the internal
+# compose network (SCRAPE_WORKER_MODE=external), so the browser is supervised by
+# Docker and can be restarted independently of the API.
 
 services:
   muninn:
@@ -6,7 +10,7 @@ services:
     image: muninn:latest
     container_name: muninn
     ports:
-      - "${PORT:-8000}:8000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8000}:8000"
     environment:
       # The DB file lives inside the volume; TTL, delays, quarantines and the
       # scrape module are tunable here too (see app/config.py for the list).
@@ -15,21 +19,35 @@ services:
       THROTTLE_MIN_DELAY: ${THROTTLE_MIN_DELAY:-15}
       THROTTLE_MAX_DELAY: ${THROTTLE_MAX_DELAY:-30}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-86400}
-      # Scrape module: the browser pool runs in its own supervised container,
-      # so the API talks to it over the internal network (external mode).
+      HOST: 0.0.0.0   # containers must bind all interfaces; the published
+                      # port is still bound to 127.0.0.1 by default above.
+      # --- scrape module -------------------------------------------------
       SCRAPE_WORKER_MODE: external
       SCRAPE_WORKER_URL: http://scrape-worker:8765
       BROWSER_IDLE_TIMEOUT: ${BROWSER_IDLE_TIMEOUT:-300}
       PER_HOST_DELAY_SECONDS: ${PER_HOST_DELAY_SECONDS:-2}
       SCRAPE_CACHE_TTL: ${SCRAPE_CACHE_TTL:-3600}
+      SCRAPE_RESPECT_ROBOTS: ${SCRAPE_RESPECT_ROBOTS:-true}
+      # Set to false only to scrape hosts you control that block private ranges.
+      SCRAPE_ALLOW_PRIVATE_TARGETS: "false"
     depends_on:
       scrape-worker:
         condition: service_healthy
     volumes:
       - ./data:/app/data
     restart: always
+    # Hardening: no new privileges, no capabilities, everything read-only
+    # except the data volume and the browser's temp profile.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      # python:slim has no curl, so probe with the interpreter itself.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -49,9 +67,21 @@ services:
       BROWSER_IDLE_TIMEOUT: ${BROWSER_IDLE_TIMEOUT:-300}
       SCRAPE_WORKER_HOST: 0.0.0.0
       SCRAPE_WORKER_PORT: "8765"
+      # Chromium's own sandbox is disabled here: the container drops ALL
+      # capabilities, which the sandbox needs. This is the one place where
+      # "root + no sandbox" would be dangerous, so the container also runs as an
+      # unprivileged user with a read-only root filesystem.
+      BROWSER_NO_SANDBOX: "true"
+      SCRAPE_RESPECT_ROBOTS: "false"   # the API already enforces the policy
     restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,json; json.load(urllib.request.urlopen('http://localhost:8765/ping'))['ok']"]
+      test: ["CMD", "python", "-c", "import urllib.request,json; json.load(urllib.request.urlopen('http://127.0.0.1:8765/ping'))['ok']"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -131,6 +131,8 @@ disallow_incomplete_defs = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Make `pytest` work when invoked as a bare binary, not just `python -m pytest`.
+pythonpath = ["."]
 addopts = "-q"
 filterwarnings = [
     "ignore::DeprecationWarning:starlette.*",

@@ -31,7 +31,7 @@ check: lint typecheck test ## Everything CI runs
 lint: ## Ruff lint check
 	$(RUFF) check .
 
-format: ## Ruff auto-format + import sort
+format: ## Ruff auto-format + import sort (opt-in; not a CI gate)
 	$(RUFF) format .
 	$(RUFF) check --fix .
 

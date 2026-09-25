@@ -150,7 +150,7 @@ class BrowserController:
             self._pw = await self._stealth_cm.__aenter__()
             self._browser = await self._pw.chromium.launch(
                 headless=self._settings.headless,
-                args=list(self._settings.browser_args) + ["--no-sandbox"],
+                args=self._settings.browser_launch_args(),
             )
             logger.info("stealth Chromium launched (max contexts=%d)",
                         self._settings.browser_max_contexts)
