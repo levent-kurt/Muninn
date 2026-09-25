@@ -1,7 +1,8 @@
-"""Scrape pipeline orchestrator (TODO2 Phase 4).
+"""Scrape pipeline orchestrator.
 
 Pipeline for one ``GET /scrape`` request::
 
+    target guard          -> SSRF + robots.txt policy (ops/netguard, ops/robots)
     cache hit?            -> return cached response immediately
     politeness slot       -> host-lock + mandatory gap for the whole request
     fast-path fetch       -> plain HTTP, redirects tracked
@@ -14,10 +15,13 @@ Pipeline for one ``GET /scrape`` request::
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from app.config import Settings
 from fetchers.fast_path import FastPathResult
+from ops.netguard import validate_target_url
+from ops.robots import RobotsGate
 from parsers import block_detector
 from parsers.content import extract_content
 from parsers.sitemap import looks_like_sitemap, parse_sitemap
@@ -41,12 +45,34 @@ class ScrapeService:
         politeness: HostPoliteness,
         cache: ScrapeCache,
         browser_pool: BrowserPoolManager,
+        robots: RobotsGate | None = None,
+        validator: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self._settings = settings
         self._fetcher = fetcher
         self._politeness = politeness
         self._cache = cache
         self._pool = browser_pool
+        # Both guards default to the real, settings-driven implementations.
+        # Tests inject their own to stay offline; neither has an off switch here,
+        # because a guard that must be re-enabled in two places will be forgotten.
+        self._robots = (
+            robots
+            if robots is not None
+            else (
+                RobotsGate(settings.user_agent, settings.scrape_fast_path_timeout)
+                if settings.scrape_respect_robots
+                else None
+            )
+        )
+        self._validator = validator or self._default_validator
+
+    async def _default_validator(self, url: str) -> str:
+        return await validate_target_url(
+            url,
+            allow_private=self._settings.scrape_allow_private_targets,
+            allowed_hosts=self._settings.scrape_allowed_hosts,
+        )
 
     # -- public ---------------------------------------------------------------
 
@@ -63,9 +89,17 @@ class ScrapeService:
         max_links = self._settings.max_links_cap
         render_flag = 1 if render else 0
 
+        # Guard first, cache second: the cache is keyed on the requested URL, so
+        # a target that has since become disallowed (robots changed, host turned
+        # internal) would otherwise keep being served straight from cache.
+        url = await self._validator(url)
+
         hit = await self._cache.get(url, render_flag)
         if hit is not None:
             return hit
+
+        if self._robots is not None:
+            await self._robots.check(url)
 
         async with self._politeness.slot(url):
             fast = await self._fetcher.fetch(url)

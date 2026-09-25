@@ -49,6 +49,7 @@ from playwright_stealth import Stealth
 from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
+from ops.netguard import TargetNotAllowedError, validate_target_url
 
 logger = logging.getLogger("scrape-worker")
 
@@ -386,9 +387,19 @@ def create_app(
     @app.post("/render")
     async def render(request: Request, payload: RenderRequest) -> JSONResponse:
         controller: BrowserController = request.app.state.controller
+        # Defence in depth: the worker is its own HTTP service, so it re-applies
+        # the same outbound guard the API does rather than trusting the caller.
+        try:
+            url = await validate_target_url(
+                payload.url,
+                allow_private=settings.scrape_allow_private_targets,
+                allowed_hosts=settings.scrape_allowed_hosts,
+            )
+        except TargetNotAllowedError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
         try:
             result = await asyncio.wait_for(
-                controller.render(payload.url, payload.goto_timeout_ms),
+                controller.render(url, payload.goto_timeout_ms),
                 timeout=settings.scrape_render_timeout,
             )
             return JSONResponse(result)

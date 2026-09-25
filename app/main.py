@@ -25,6 +25,7 @@ from drivers.browser_driver import BrowserDriver, BrowserDriverError
 from fetchers.fast_path import FastPathFetcher
 from ops.cache import ScrapeCache
 from ops.politeness import HostPoliteness
+from ops.ratelimit import RateLimiter
 from routers.health import router as health_router
 from routers.scrape import router as scrape_router
 from services.scrape_service import ScrapeService
@@ -63,8 +64,12 @@ def create_app(
 
         # --- scrape module -------------------------------------------------
         fetch: FastPathFetcher = scrape_fetcher_factory(settings)
-        politeness = HostPoliteness(settings.per_host_delay_seconds)
+        politeness = HostPoliteness(
+            settings.per_host_delay_seconds,
+            settings.politeness_idle_evict_seconds,
+        )
         scrape_cache = ScrapeCache(settings.scrape_cache_ttl, settings.scrape_cache_max_entries)
+        limiter = RateLimiter(settings.scrape_rate_limit_per_minute)
         pool: BrowserPoolManager = scrape_pool_factory(settings)
         scrape_service = ScrapeService(
             settings,
@@ -91,6 +96,7 @@ def create_app(
         app.state.scrape_service = scrape_service
         app.state.scrape_pool = pool
         app.state.scrape_cache = scrape_cache
+        app.state.scrape_limiter = limiter
         app.state.started_at = time.time()
 
         yield
@@ -105,6 +111,11 @@ def create_app(
         description="Unified REST API for stealth web search (/search) and page scraping (/scrape).",
         version="0.1.0",
         lifespan=lifespan,
+        # The service is unauthenticated, so its schema is not published by
+        # default. Enable with DOCS_ENABLED=1 for local development.
+        docs_url="/docs" if settings.docs_enabled else None,
+        redoc_url="/redoc" if settings.docs_enabled else None,
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
     )
 
     # ------------------------------------------------------------------ routes

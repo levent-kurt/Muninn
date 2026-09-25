@@ -97,6 +97,31 @@ class Settings:
     # Per-host politeness: minimum gap between consecutive requests to one
     # hostname (applies across the fast-path AND browser-render legs).
     per_host_delay_seconds: float = field(default_factory=lambda: _env_float("PER_HOST_DELAY_SECONDS", 2.0))
+    # Idle time after which a host's politeness bookkeeping is discarded.
+    politeness_idle_evict_seconds: float = field(
+        default_factory=lambda: _env_float("POLITENESS_IDLE_EVICT_SECONDS", 300.0)
+    )
+
+    # --- Outbound safety guards (see ops/netguard.py, ops/robots.py) --------
+    # SSRF guard: private/loopback/link-local targets are refused by default.
+    scrape_allow_private_targets: bool = field(
+        default_factory=lambda: _env_bool("SCRAPE_ALLOW_PRIVATE_TARGETS", False)
+    )
+    # Comma-separated allowlist that overrides the network checks entirely
+    # (e.g. "mycorp.lan,10.0.0.5"). Empty = apply the SSRF rules.
+    scrape_allowed_hosts: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            h.strip() for h in os.environ.get("SCRAPE_ALLOWED_HOSTS", "").split(",") if h.strip()
+        )
+    )
+    # robots.txt policy for /scrape targets (fail-open when unreachable).
+    scrape_respect_robots: bool = field(
+        default_factory=lambda: _env_bool("SCRAPE_RESPECT_ROBOTS", True)
+    )
+    # Coarse per-client rate limit on /scrape (abuse protection, not auth).
+    scrape_rate_limit_per_minute: int = field(
+        default_factory=lambda: _env_int("SCRAPE_RATE_LIMIT_PER_MINUTE", 60)
+    )
 
     # Stealth browser pool / worker process.
     browser_idle_timeout: int = field(default_factory=lambda: _env_int("BROWSER_IDLE_TIMEOUT", 300))
@@ -112,8 +137,14 @@ class Settings:
     scrape_worker_log_file: str = field(default_factory=lambda: os.environ.get("SCRAPE_WORKER_LOG_FILE", "data/scrape-worker.log"))
 
     # --- Service ------------------------------------------------------------
-    host: str = field(default_factory=lambda: os.environ.get("HOST", "0.0.0.0"))
+    # Bind address. Defaults to loopback so a bare `uvicorn app.main:app` is
+    # not reachable from the network; docker-compose overrides this to 0.0.0.0
+    # because containers must bind all interfaces.
+    host: str = field(default_factory=lambda: os.environ.get("HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: _env_int("PORT", 8000))
+    # Interactive API docs (/docs, /redoc, /openapi.json). Off by default: the
+    # service is unauthenticated, so its schema should not be published too.
+    docs_enabled: bool = field(default_factory=lambda: _env_bool("DOCS_ENABLED", False))
 
 
 def get_settings() -> Settings:

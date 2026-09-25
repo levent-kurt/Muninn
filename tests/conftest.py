@@ -55,6 +55,10 @@ def make_test_settings(**overrides) -> Settings:
         "throttle_max_delay": 0.0,
         "cache_db_path": ":memory:",
         "request_timeout_seconds": 10,
+        # Outbound guards are exercised by their own unit tests; here they are
+        # switched off so the suite performs no DNS lookups and no HTTP probes.
+        "scrape_allow_private_targets": True,
+        "scrape_respect_robots": False,
     }
     base.update(overrides)
     return Settings(**base)

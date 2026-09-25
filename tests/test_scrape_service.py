@@ -13,6 +13,7 @@ from browser_pool.manager import BrowserPoolUnavailable, RenderOutcome
 from fetchers.fast_path import FastPathError, FastPathResult
 from ops.cache import ScrapeCache
 from ops.politeness import HostPoliteness
+from ops.robots import RobotsGate
 from schemas.scrape import LinkItem, ScrapeResponse
 from services.scrape_service import ScrapeService
 
@@ -92,6 +93,16 @@ class FakePool:
         )
 
 
+async def _allow_any_url(url: str) -> str:
+    """Stand-in for the SSRF guard: no DNS, so tests stay offline."""
+    return url
+
+
+async def _no_robots(_url: str) -> str | None:
+    """Stand-in for the robots.txt download: unreachable -> fail open."""
+    return None
+
+
 def _service(fetcher: FakeFetcher, pool: FakePool, *, render: int = 0, settings=None) -> ScrapeService:
     s = settings or _settings()
     return ScrapeService(
@@ -100,6 +111,8 @@ def _service(fetcher: FakeFetcher, pool: FakePool, *, render: int = 0, settings=
         politeness=HostPoliteness(s.per_host_delay_seconds),
         cache=ScrapeCache(s.scrape_cache_ttl),
         browser_pool=pool,
+        validator=_allow_any_url,
+        robots=RobotsGate("Muninn", fetch_text=_no_robots),
     )
 
 
