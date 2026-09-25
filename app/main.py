@@ -1,8 +1,9 @@
-"""StealthSearch FastAPI gateway - /search, /health, /status.
+"""StealthSearch FastAPI gateway - /search, /scrape, /health, /status.
 
 The application is long-lived: the stealth Chromium driver, SQLite cache,
-engine manager, and queue worker are all started once in the lifespan and shut
-down cleanly on exit.
+engine manager, queue worker, scrape fast-path fetcher, and the supervising
+browser-pool manager are all started once in the lifespan and shut down
+cleanly on exit.
 """
 
 from __future__ import annotations
@@ -19,7 +20,14 @@ from app.cache import SearchCache
 from app.config import SUPPORTED_ENGINES, Settings, get_settings
 from app.engine_manager import AllEnginesQuarantinedError, EngineManager
 from app.search_service import SearchService
+from browser_pool.manager import BrowserPoolManager
 from drivers.browser_driver import BrowserDriver, BrowserDriverError
+from fetchers.fast_path import FastPathFetcher
+from ops.cache import ScrapeCache
+from ops.politeness import HostPoliteness
+from routers.health import router as health_router
+from routers.scrape import router as scrape_router
+from services.scrape_service import ScrapeService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,8 +39,15 @@ logger = logging.getLogger("stealthsearch")
 def create_app(
     settings: Settings | None = None,
     driver_factory: Callable[[Settings], BrowserDriver | None] = lambda s: BrowserDriver(s),
+    scrape_fetcher_factory: Callable[[Settings], FastPathFetcher] = FastPathFetcher,
+    scrape_pool_factory: Callable[[Settings], BrowserPoolManager] = BrowserPoolManager,
 ) -> FastAPI:
-    """Application factory; tests inject a ``driver_factory`` returning a stub."""
+    """Application factory.
+
+    Tests inject a ``driver_factory`` (canned search HTML) plus, for the scrape
+    module, ``scrape_fetcher_factory`` (mocked httpx transport) and/or
+    ``scrape_pool_factory`` (fake browser pool) to stay offline and fast.
+    """
     settings = settings or get_settings()
 
     @asynccontextmanager
@@ -42,6 +57,19 @@ def create_app(
         engines = EngineManager(settings)
         service = SearchService(settings, driver, cache, engines)
 
+        # --- scrape module -------------------------------------------------
+        fetch: FastPathFetcher = scrape_fetcher_factory(settings)
+        politeness = HostPoliteness(settings.per_host_delay_seconds)
+        scrape_cache = ScrapeCache(settings.scrape_cache_ttl)
+        pool: BrowserPoolManager = scrape_pool_factory(settings)
+        scrape_service = ScrapeService(
+            settings,
+            fetcher=fetch,
+            politeness=politeness,
+            cache=scrape_cache,
+            browser_pool=pool,
+        )
+
         try:
             if driver is not None:
                 await driver.start()
@@ -50,24 +78,29 @@ def create_app(
             logger.error("browser failed to start: %s", exc)
             raise
         await service.start()
+        await pool.start()
 
         app.state.settings = settings
         app.state.driver = driver
         app.state.cache = cache
         app.state.engines = engines
         app.state.service = service
+        app.state.scrape_service = scrape_service
+        app.state.scrape_pool = pool
+        app.state.scrape_cache = scrape_cache
         app.state.started_at = time.time()
 
         yield
 
         await service.stop()
+        await pool.stop()
         if driver is not None:
             await driver.stop()
         await cache.close()
 
     app = FastAPI(
         title="StealthSearch API Gateway",
-        description="Unified REST API for web searches via stealth-driven Google/Bing/DDG/Mojeek scraping.",
+        description="Unified REST API for stealth web search (/search) and page scraping (/scrape).",
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -79,9 +112,12 @@ def create_app(
         return {
             "service": "StealthSearch API Gateway",
             "version": "0.1.0",
-            "endpoints": {"/search": "GET q, max_results, engine, force_refresh",
-                          "/health": "GET service health",
-                          "/status": "GET engine + queue metrics"},
+            "endpoints": {
+                "/search": "GET q, max_results, engine, force_refresh",
+                "/scrape": "GET url, render, max_text",
+                "/health": "GET service health (fetcher + browser pool)",
+                "/status": "GET engine + queue metrics",
+            },
             "engines": list(SUPPORTED_ENGINES),
         }
 
@@ -102,7 +138,6 @@ def create_app(
             engine = engine.lower()
 
         service: SearchService = request.app.state.service
-        settings: Settings = request.app.state.settings
         try:
             response = await service.submit(
                 query=q,
@@ -122,26 +157,6 @@ def create_app(
             raise HTTPException(status_code=504, detail="search timed out in the queue")
         return JSONResponse(content=response.to_dict())
 
-    @app.get("/health")
-    async def health(request: Request) -> dict:
-        settings = request.app.state.settings
-        engine_mgr: EngineManager = request.app.state.engines
-        service: SearchService = request.app.state.service
-        driver = request.app.state.driver
-        cache = request.app.state.cache
-
-        active = engine_mgr.active_engines()
-        status = "ok" if active else "degraded"
-        return {
-            "status": status,
-            "browser_ready": driver is not None and driver._started,
-            "queue_depth": service.queue_depth,
-            "cache_entries": await cache.count(),
-            "active_engines": active,
-            "quarantined_engines": [e for e in engine_mgr.engines if e not in active],
-            "uptime_seconds": int(time.time() - request.app.state.started_at),
-        }
-
     @app.get("/status")
     async def status(request: Request) -> dict:
         engine_mgr: EngineManager = request.app.state.engines
@@ -154,6 +169,9 @@ def create_app(
             "metrics": service.metrics.to_dict(),
             "engines": engines,
         }
+
+    app.include_router(scrape_router)
+    app.include_router(health_router)
 
     return app
 

@@ -9,46 +9,31 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# System packages required by Playwright's Chromium on slim images.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        curl \
-        ca-certificates \
-        fonts-liberation \
-        fonts-dejavu-core \
-        libasound2 \
-        libatk-bridge2.0-0 \
-        libatk1.0-0 \
-        libcups2 \
-        libdbus-1-3 \
-        libdrm2 \
-        libgbm1 \
-        libglib2.0-0 \
-        libnspr4 \
-        libnss3 \
-        libx11-6 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxfixes3 \
-        libxkbcommon0 \
-        libxrandr2 \
-        xdg-utils \
-    && rm -rf /var/lib/apt/lists/*
-
-# Python dependencies first for better layer caching.
+# Python dependencies first for better layer caching. Browser + system deps
+# are installed together so both the API (search) and the scrape worker
+# (browser pool) can run in the same image.
 COPY requirements.txt .
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
-    && python -m playwright install --with-deps chromium
+    && python -m playwright install --with-deps chromium \
+    && python -m playwright install-deps chromium
 
-# Application code.
+# Application code (all packages: search + scrape module).
 COPY app ./app
 COPY drivers ./drivers
+COPY schemas ./schemas
+COPY parsers ./parsers
+COPY fetchers ./fetchers
+COPY browser_pool ./browser_pool
+COPY ops ./ops
+COPY services ./services
+COPY routers ./routers
 
-# Persistent cache database + screenshots live in a mounted volume.
+# Persistent cache database lives in a mounted volume.
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]
 
 EXPOSE 8000
+EXPOSE 8765
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

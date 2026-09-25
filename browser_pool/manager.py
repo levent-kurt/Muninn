@@ -260,8 +260,16 @@ class BrowserPoolManager:
     # -- health / idle ---------------------------------------------------------
 
     async def status(self) -> PoolStatus:
-        if not self._process_alive() and self.mode == "subprocess":
-            return PoolStatus(ok=False, mode=self.mode, detail="worker not started")
+        if self.mode == "subprocess":
+            if self._process is None:
+                # Lazy-start: nothing running yet is the healthy default state.
+                return PoolStatus(ok=True, mode=self.mode, detail="lazy (not started)")
+            if self._process.returncode is not None:
+                return PoolStatus(
+                    ok=False,
+                    mode=self.mode,
+                    detail=f"worker exited ({self._process.returncode})",
+                )
         try:
             async with self._client() as client:
                 resp = await client.get("/ping")

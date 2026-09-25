@@ -8,19 +8,51 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     environment:
-      # The DB file lives inside the volume; TTL, delays and quarantines are
-      # tunable here too (see app/config.py for the full variable list).
+      # The DB file lives inside the volume; TTL, delays, quarantines and the
+      # scrape module are tunable here too (see app/config.py for the list).
       CACHE_DB_PATH: /app/data/cache.db
       HEADLESS: "true"
       THROTTLE_MIN_DELAY: ${THROTTLE_MIN_DELAY:-15}
       THROTTLE_MAX_DELAY: ${THROTTLE_MAX_DELAY:-30}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-86400}
+      # Scrape module: the browser pool runs in its own supervised container,
+      # so the API talks to it over the internal network (external mode).
+      SCRAPE_WORKER_MODE: external
+      SCRAPE_WORKER_URL: http://scrape-worker:8765
+      BROWSER_IDLE_TIMEOUT: ${BROWSER_IDLE_TIMEOUT:-300}
+      PER_HOST_DELAY_SECONDS: ${PER_HOST_DELAY_SECONDS:-2}
+      SCRAPE_CACHE_TTL: ${SCRAPE_CACHE_TTL:-3600}
+    depends_on:
+      scrape-worker:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
-    restart: unless-stopped
+    restart: always
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
+
+  scrape-worker:
+    build: .
+    image: stealthsearch:latest
+    container_name: scrape-worker
+    # Standalone stealth-browser render process, decoupled from the API. It is
+    # supervised by Docker (restart: always); Chromium inside it is
+    # lazy-started and shuts itself down after BROWSER_IDLE_TIMEOUT.
+    command: ["python", "-m", "browser_pool.worker", "--host", "0.0.0.0", "--port", "8765"]
+    environment:
+      HEADLESS: "true"
+      BROWSER_MAX_CONTEXTS: ${BROWSER_MAX_CONTEXTS:-1}
+      BROWSER_IDLE_TIMEOUT: ${BROWSER_IDLE_TIMEOUT:-300}
+      SCRAPE_WORKER_HOST: 0.0.0.0
+      SCRAPE_WORKER_PORT: "8765"
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,json; json.load(urllib.request.urlopen('http://localhost:8765/ping'))['ok']"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

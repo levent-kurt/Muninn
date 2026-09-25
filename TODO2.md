@@ -128,8 +128,8 @@
 
 ## Phase 5: API Router & Service Deployment
 
-* [ ] **FastAPI Endpoint (`routers/scrape.py`)**
-* [ ] Add `GET /scrape` endpoint accepting parameters:
+* [x] **FastAPI Endpoint (`routers/scrape.py`)**
+* [x] Add `GET /scrape` endpoint accepting parameters:
 * `url: HttpUrl` (required)
 * `render: int = 0` (optional, 0 or 1)
 * `max_text: int = 32000` (optional)
@@ -137,22 +137,22 @@
 
 
 
-* [ ] **Health Check Enhancements (`routers/health.py`)**
-* [ ] Update `/health` endpoint to monitor and report status for both the HTTP fetcher and the Stealth Browser process pool.
+* [x] **Health Check Enhancements (`routers/health.py`)**
+* [x] Update `/health` endpoint to monitor and report status for both the HTTP fetcher and the Stealth Browser process pool.
 
 
-* [ ] **Docker & Deployment Updates**
-* [ ] Update `Dockerfile` to include Playwright Chromium system dependencies (`playwright install-deps chromium`).
-* [ ] Update `docker-compose.yml` health check parameters and restart policies (`restart: always`).
+* [x] **Docker & Deployment Updates**
+* [x] Update `Dockerfile` to include Playwright Chromium system dependencies (`playwright install-deps chromium`).
+* [x] Update `docker-compose.yml` health check parameters and restart policies (`restart: always`).
 
 
-* [ ] **Testing & Verification**
-* [ ] Write integration tests for fast-path scraping on standard HTML pages.
-* [ ] Write tests for challenge detection and automatic escalation to the stealth browser.
-* [ ] Write tests verifying sitemap extraction and link capping.
+* [x] **Testing & Verification**
+* [x] Write integration tests for fast-path scraping on standard HTML pages.
+* [x] Write tests for challenge detection and automatic escalation to the stealth browser.
+* [x] Write tests verifying sitemap extraction and link capping.
 
 
-* [ ] Stage changes and commit Phase 5 (`git commit -m "feat(scrape): complete Phase 5 - endpoint and docker setup"`).
+* [x] Stage changes and commit Phase 5 (`git commit -m "feat(scrape): complete Phase 5 - endpoint and docker setup"`).
 
 ---
 
