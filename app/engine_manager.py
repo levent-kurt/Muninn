@@ -17,7 +17,7 @@ import asyncio
 import logging
 import time
 
-from app.config import Settings, SUPPORTED_ENGINES
+from app.config import SUPPORTED_ENGINES, Settings
 from app.models import EngineState
 
 logger = logging.getLogger(__name__)

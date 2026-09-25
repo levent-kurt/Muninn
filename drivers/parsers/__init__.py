@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from drivers.parsers.base import BaseParser, EngineBlockedError
-from drivers.parsers.google import GoogleParser
 from drivers.parsers.bing import BingParser
 from drivers.parsers.ddg import DuckDuckGoParser
+from drivers.parsers.google import GoogleParser
 from drivers.parsers.mojeek import MojeekParser
 
 __all__ = [

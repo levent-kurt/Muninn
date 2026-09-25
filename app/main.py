@@ -1,4 +1,4 @@
-"""StealthSearch FastAPI gateway - /search, /scrape, /health, /status.
+"""Muninn FastAPI gateway - /search, /scrape, /health, /status.
 
 The application is long-lived: the stealth Chromium driver, SQLite cache,
 engine manager, queue worker, scrape fast-path fetcher, and the supervising
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -33,7 +33,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-logger = logging.getLogger("stealthsearch")
+logger = logging.getLogger("muninn")
 
 
 def create_app(
@@ -51,16 +51,20 @@ def create_app(
     settings = settings or get_settings()
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         driver = driver_factory(settings)
         cache = SearchCache(settings.cache_db_path, settings.cache_ttl_seconds)
         engines = EngineManager(settings)
+        if driver is None:
+            raise RuntimeError(
+                "driver_factory returned no browser driver; the search API cannot start"
+            )
         service = SearchService(settings, driver, cache, engines)
 
         # --- scrape module -------------------------------------------------
         fetch: FastPathFetcher = scrape_fetcher_factory(settings)
         politeness = HostPoliteness(settings.per_host_delay_seconds)
-        scrape_cache = ScrapeCache(settings.scrape_cache_ttl)
+        scrape_cache = ScrapeCache(settings.scrape_cache_ttl, settings.scrape_cache_max_entries)
         pool: BrowserPoolManager = scrape_pool_factory(settings)
         scrape_service = ScrapeService(
             settings,
@@ -71,8 +75,7 @@ def create_app(
         )
 
         try:
-            if driver is not None:
-                await driver.start()
+            await driver.start()
             await cache.connect()
         except BrowserDriverError as exc:
             logger.error("browser failed to start: %s", exc)
@@ -94,12 +97,11 @@ def create_app(
 
         await service.stop()
         await pool.stop()
-        if driver is not None:
-            await driver.stop()
+        await driver.stop()
         await cache.close()
 
     app = FastAPI(
-        title="StealthSearch API Gateway",
+        title="Muninn API Gateway",
         description="Unified REST API for stealth web search (/search) and page scraping (/scrape).",
         version="0.1.0",
         lifespan=lifespan,
@@ -110,7 +112,7 @@ def create_app(
     @app.get("/", include_in_schema=False)
     async def root() -> dict:
         return {
-            "service": "StealthSearch API Gateway",
+            "service": "Muninn API Gateway",
             "version": "0.1.0",
             "endpoints": {
                 "/search": "GET q, max_results, engine, force_refresh",
@@ -153,8 +155,10 @@ def create_app(
                     "detail": "every search engine is under quarantine; try again later",
                 },
             )
-        except TimeoutError:
-            raise HTTPException(status_code=504, detail="search timed out in the queue")
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504, detail="search timed out in the queue"
+            ) from exc
         return JSONResponse(content=response.to_dict())
 
     @app.get("/status")

@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, TimeoutError as PWTimeoutError
-from playwright.async_api import async_playwright
+from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import TimeoutError as PWTimeoutError
 from playwright_stealth import Stealth
 
 from app.config import Settings
@@ -91,11 +91,12 @@ class BrowserDriver:
         """
         if not self._started or self._context is None:
             raise BrowserDriverError("browser driver is not started")
+        context = self._context
         budget = max(30.0, self._settings.navigation_timeout_ms / 1000 + 15)
 
-        async def _fetch():
+        async def _fetch() -> tuple[str | None, int | None]:
             async with self._lock:
-                page: Page = await self._context.new_page()
+                page: Page = await context.new_page()
                 try:
                     response = await page.goto(
                         url,

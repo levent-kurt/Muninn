@@ -29,7 +29,9 @@ import re
 import signal
 import subprocess
 import time
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -38,8 +40,10 @@ from playwright.async_api import (
     Browser,
     BrowserContext,
     Playwright,
-    TimeoutError as PWTimeoutError,
     async_playwright,
+)
+from playwright.async_api import (
+    TimeoutError as PWTimeoutError,
 )
 from playwright_stealth import Stealth
 from pydantic import BaseModel, Field
@@ -47,6 +51,10 @@ from pydantic import BaseModel, Field
 from app.config import Settings, get_settings
 
 logger = logging.getLogger("scrape-worker")
+
+# Grace period between the worker's own exit and the reaper's SIGKILL sweep:
+# long enough for the graceful browser close above to have finished.
+REAPER_GRACE_SECONDS = 1.0
 
 
 class RenderRequest(BaseModel):
@@ -79,14 +87,17 @@ class BrowserController:
     async def stop(self) -> None:
         if self._idle_task is not None:
             self._idle_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._idle_task
-            except asyncio.CancelledError:
-                pass
             self._idle_task = None
         await self._shutdown_browser()
 
     # -- state ------------------------------------------------------------
+
+    @property
+    def is_started(self) -> bool:
+        """Whether the controller is running (used by /health reporting)."""
+        return self._started
 
     @property
     def browser_started(self) -> bool:
@@ -145,6 +156,8 @@ class BrowserController:
 
     async def _render_page(self, url: str, goto_timeout_ms: int) -> tuple[str, str, int]:
         """Fresh context+page per job; destroy the context afterwards."""
+        if self._browser is None:  # pragma: no cover - guarded by _ensure_browser
+            raise RuntimeError("browser is not started")
         context: BrowserContext = await self._browser.new_context(
             user_agent=self._settings.user_agent,
             locale=self._settings.locale,
@@ -244,50 +257,62 @@ class BrowserController:
             and os.getpgid(os.getpid()) == os.getpid()
         ):
             signal.signal(signal.SIGTERM, signal.SIG_IGN)  # survive the group signal
-            try:
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(os.getpid(), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
             try:
                 reaper = os.fork()
             except OSError:  # pragma: no cover - fork unavailable
                 reaper = -1
             if reaper == 0:  # child: detached reaper
-                try:
-                    os.setsid()  # leave the worker's group so our killpg is safe
-                except OSError:  # pragma: no cover
-                    pass
-                time.sleep(1.0)  # let the graceful close finish first
-                for pid, _pgid in tree:
-                    if pid > 0:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                for _pid, pgid in tree:
-                    if pgid > 0:
-                        try:
-                            os.killpg(pgid, signal.SIGKILL)
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                for profile in profiles:
-                    try:
-                        out = subprocess.run(
-                            ["pgrep", "-f", profile],
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        ).stdout
-                    except (OSError, subprocess.SubprocessError, TimeoutError):  # pragma: no cover
-                        continue
-                    for token in out.split():
-                        try:
-                            os.kill(int(token), signal.SIGKILL)
-                        except (ProcessLookupError, ValueError):
-                            pass
+                with suppress(OSError):  # leave the worker's group so our killpg is safe
+                    os.setsid()
+                time.sleep(REAPER_GRACE_SECONDS)
+                _reap(tree, profiles)
                 os._exit(0)
             logger.info("subprocess worker idle -> exiting (code 0)")
             os._exit(0)
+
+
+def _reap(tree: list[tuple[int, int]], profiles: set[str]) -> None:
+    """SIGKILL everything the pre-teardown snapshot captured.
+
+    Runs inside the detached reaper child and never returns to the event loop.
+    Three passes, so nothing escapes:
+
+    1. every pid in the snapshot, in case its process group is already gone;
+    2. every process group in the snapshot, which catches anything Chromium
+       spawned *into the browser's group* while we were tearing down;
+    3. every process still using the browser's ``--user-data-dir``, which
+       catches anything born late enough to have its own new group.
+
+    Extracted out of the fork so it can be tested directly.
+    """
+    for pid, _pgid in tree:
+        if pid > 0:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+    for _pid, pgid in tree:
+        if pgid > 0:
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(pgid, signal.SIGKILL)
+    for profile in profiles:
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", profile],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout
+        except (OSError, subprocess.SubprocessError, TimeoutError):  # pragma: no cover
+            continue
+        for token in out.split():
+            try:
+                pid = int(token)
+            except ValueError:
+                continue
+            if pid > 0:
+                with suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
 
 
 def _tree_snapshot(root: int) -> tuple[list[tuple[int, int]], set[str]]:
@@ -337,13 +362,13 @@ def _tree_snapshot(root: int) -> tuple[list[tuple[int, int]], set[str]]:
 
 def create_app(
     settings: Settings | None = None,
-    controller_factory=None,
+    controller_factory: Callable[[Settings], BrowserController] | None = None,
 ) -> FastAPI:
     """Application factory; tests inject a fake ``controller_factory``."""
     settings = settings or get_settings()
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         controller = (controller_factory(settings) if controller_factory
                       else BrowserController(settings))
         await controller.start()
@@ -351,7 +376,7 @@ def create_app(
         yield
         await controller.stop()
 
-    app = FastAPI(title="StealthSearch scrape-worker", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Muninn scrape worker", version="0.1.0", lifespan=lifespan)
 
     @app.get("/ping")
     async def ping(request: Request) -> dict:
@@ -389,8 +414,7 @@ def _configure_logging(log_level: str, log_file: str) -> None:
     logger.setLevel(level)
     logger.propagate = False  # avoid duplicating through uvicorn's root config
     try:
-        parent = os.path.dirname(log_file) or "."
-        os.makedirs(parent, exist_ok=True)
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         handler: logging.Handler = logging.FileHandler(log_file)
         logger.info("worker log -> %s", log_file)
     except OSError:
@@ -401,7 +425,7 @@ def _configure_logging(log_level: str, log_file: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="StealthSearch scrape worker")
+    parser = argparse.ArgumentParser(description="Muninn scrape worker")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--log-level", default="info")
@@ -411,11 +435,9 @@ def main(argv: list[str] | None = None) -> None:
     if settings.scrape_worker_mode == "subprocess":
         # Become our own process-group leader so the idle shutdown can signal
         # the whole tree (node driver + Chromium) in one killpg instead of
-        # racing per-process teardown. No-op if already a group leader.
-        try:
+        # racing per-process teardown. No-op if already a group/session leader.
+        with suppress(OSError):
             os.setpgid(0, 0)
-        except OSError:  # pragma: no cover - already a group/session leader
-            pass
     _configure_logging(args.log_level, settings.scrape_worker_log_file)
     host = args.host or settings.scrape_worker_host
     port = args.port or settings.scrape_worker_port

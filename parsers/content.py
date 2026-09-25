@@ -1,4 +1,4 @@
-"""Body-text and link extraction from scraped HTML (TODO2 Phase 2).
+"""Body-text and link extraction from scraped HTML.
 
 * Clean main text is extracted with ``trafilatura.extract`` and capped at
   ``max_text`` characters.
@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urljoin, urldefrag, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import trafilatura
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from schemas.scrape import LinkItem
 
@@ -34,6 +35,21 @@ class ExtractedContent:
     links: list[LinkItem]
 
 
+def _attr(tag: Tag, name: str) -> str:
+    """Read a tag attribute as a plain string.
+
+    BeautifulSoup types an attribute as ``str | AttributeValueList | None``
+    (multi-valued attributes such as ``class`` return a list). We only ever want
+    the scalar text form, so normalise here instead of at every call site.
+    """
+    value = tag.get(name)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return " ".join(str(part) for part in value)
+
+
 def extract_text(html: str, max_text: int) -> str:
     """Clean main-body text via trafilatura, capped at ``max_text`` chars."""
     text = trafilatura.extract(
@@ -50,15 +66,27 @@ def extract_text(html: str, max_text: int) -> str:
     return text[:max_text]
 
 
-def extract_links(html: str, final_url: str, max_links: int) -> list[LinkItem]:
-    """Resolve, deduplicate, and cap the anchors found in ``html``."""
-    soup = BeautifulSoup(html, "lxml")
+def extract_links(
+    html: str | Tag,
+    final_url: str,
+    max_links: int,
+    soup: BeautifulSoup | None = None,
+) -> list[LinkItem]:
+    """Resolve, deduplicate, and cap the anchors found in ``html``.
+
+    ``soup`` lets a caller that already parsed the document pass the tree in,
+    so a 10 MB page is not re-parsed just to walk its anchors.
+    """
+    if soup is None:
+        tree = BeautifulSoup(html, "lxml") if isinstance(html, str) else html
+    else:
+        tree = soup
     final_host = urlparse(final_url).netloc.lower()
 
     out: list[LinkItem] = []
     seen: set[str] = set()
-    for anchor in soup.find_all("a", href=True):
-        href = anchor.get("href", "").strip()
+    for anchor in tree.find_all("a", href=True):
+        href = _attr(anchor, "href").strip()
         if not href or href.lower().startswith(_SKIP_PREFIXES):
             continue
         abs_url = urldefrag(urljoin(final_url, href)).url
@@ -88,14 +116,14 @@ def extract_content(
 
     title = soup.title.get_text(strip=True) if soup.title else None
     meta = soup.find("meta", attrs={"name": _DESCRIPTION_PATTERN})
-    meta_description = meta.get("content", "").strip() if meta else None
-    if meta_description in ("", None):
+    meta_description = _attr(meta, "content").strip() if meta else None
+    if meta is not None and meta_description in ("", None):
         meta = soup.find("meta", attrs={"property": _DESCRIPTION_PATTERN})
-        meta_description = meta.get("content", "").strip() if meta else None
+        meta_description = _attr(meta, "content").strip() if meta else None
 
     return ExtractedContent(
         title=title,
-        meta_description=meta_description,
+        meta_description=meta_description or None,
         text=extract_text(html, max_text),
-        links=extract_links(html, final_url, max_links),
+        links=extract_links(soup, final_url, max_links, soup=soup),
     )

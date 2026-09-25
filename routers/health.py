@@ -31,9 +31,7 @@ async def health(request: Request) -> dict:
     active = engine_mgr.active_engines()
     pool_status = await pool.status()
 
-    if not active:
-        status = "degraded"
-    elif pool_status.mode == "external" and not pool_status.ok:
+    if not active or pool_status.mode == "external" and not pool_status.ok:
         status = "degraded"
     else:
         status = "ok"

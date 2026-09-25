@@ -11,9 +11,9 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import aiosqlite
 
@@ -47,8 +47,7 @@ class SearchCache:
 
     async def connect(self) -> None:
         if self._db_path != ":memory:":
-            parent = os.path.dirname(os.path.abspath(self._db_path))
-            os.makedirs(parent, exist_ok=True)
+            Path(self._db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(
@@ -63,13 +62,23 @@ class SearchCache:
             )
             """
         )
-        await self._db.commit()
+        await self._require_db().commit()
         logger.info("cache connected at %s (ttl=%ss)", self._db_path, self._ttl)
 
     async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
             self._db = None
+
+    def _require_db(self) -> aiosqlite.Connection:
+        """The live connection, or a loud error if the cache is not connected.
+
+        Every read/write goes through here so a lifecycle mistake surfaces as a
+        clear error instead of an ``AttributeError`` on ``None``.
+        """
+        if self._db is None:
+            raise RuntimeError("SearchCache is not connected; call connect() first")
+        return self._db
 
     # -- key helpers --------------------------------------------------------
 
@@ -87,7 +96,7 @@ class SearchCache:
         """Return the cached entry for ``query`` if present and unexpired."""
         key = self.key_for(query)
         async with self._lock:
-            cur = await self._db.execute(
+            cur = await self._require_db().execute(
                 "SELECT results, engine_used, stored_at, expires_at "
                 "FROM search_cache WHERE key = ?",
                 (key,),
@@ -117,7 +126,7 @@ class SearchCache:
         now = time.time()
         payload = json.dumps([r.to_dict() for r in results], ensure_ascii=False)
         async with self._lock:
-            await self._db.execute(
+            await self._require_db().execute(
                 """
                 INSERT OR REPLACE INTO search_cache
                     (key, normalized_query, results, engine_used, stored_at, expires_at)
@@ -132,20 +141,20 @@ class SearchCache:
                     now + self._ttl,
                 ),
             )
-            await self._db.commit()
+            await self._require_db().commit()
 
     async def delete(self, key: str) -> None:
         async with self._lock:
-            await self._db.execute("DELETE FROM search_cache WHERE key = ?", (key,))
-            await self._db.commit()
+            await self._require_db().execute("DELETE FROM search_cache WHERE key = ?", (key,))
+            await self._require_db().commit()
 
     async def count(self) -> int:
         """Number of live (unexpired) cache rows."""
         now = time.time()
         async with self._lock:
-            cur = await self._db.execute(
+            cur = await self._require_db().execute(
                 "SELECT COUNT(*) AS n FROM search_cache WHERE expires_at > ?", (now,)
             )
             row = await cur.fetchone()
             await cur.close()
-        return int(row["n"])
+        return int(row["n"]) if row is not None else 0

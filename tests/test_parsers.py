@@ -21,7 +21,6 @@ from tests.html_fixtures import (
     MOJEEK_HTML,
 )
 
-
 # --------------------------------------------------------------------------- parsing
 
 

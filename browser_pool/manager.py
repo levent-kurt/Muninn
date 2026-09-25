@@ -26,8 +26,9 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Callable
 
 import httpx
 
@@ -120,10 +121,8 @@ class BrowserPoolManager:
     async def stop(self) -> None:
         if self._watchdog is not None:
             self._watchdog.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._watchdog
-            except asyncio.CancelledError:
-                pass
             self._watchdog = None
         if self.mode == "subprocess" and self._process is not None:
             await self._terminate_worker()

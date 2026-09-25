@@ -1,0 +1,12 @@
+# Development / CI dependencies. Install with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# Test runner.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+
+# Lint + format.
+ruff==0.16.9
+
+# Static type checking.
+mypy==2.3.1

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 
-from app.config import Settings, SUPPORTED_ENGINES
+from app.config import SUPPORTED_ENGINES
 from app.main import create_app
 from tests.conftest import FakeDriver, make_test_settings
 
@@ -77,7 +77,7 @@ def main() -> int:
     # ------------------------------------------------------------------ report
     covered = [e for e in SUPPORTED_ENGINES if wave1_engines.get(e, 0) > 0]
     print("=" * 56)
-    print("StealthSearch batch smoke (simulated driver)")
+    print("Muninn batch smoke (simulated driver)")
     print("=" * 56)
     print(f"requests sent      : {TOTAL} ({UNIQUE_QUERIES} unique x {REPEAT_EACH})")
     print(f"cache hits (wave2) : {cache_hits}/{TOTAL - UNIQUE_QUERIES}")

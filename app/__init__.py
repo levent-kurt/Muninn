@@ -1,4 +1,4 @@
-"""StealthSearch - a lightweight, dockerized Search API Gateway.
+"""Muninn - a lightweight, dockerized Search API Gateway.
 
 See SPEC.md and TODO.md for the architecture and implementation roadmap.
 """

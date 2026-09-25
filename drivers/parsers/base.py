@@ -12,7 +12,26 @@ from __future__ import annotations
 import re
 from urllib.parse import urljoin
 
+from bs4.element import Tag
+
 from app.models import SearchResult
+
+
+def _attr(node: Tag | None, name: str) -> str:
+    """Read a tag attribute as a plain string.
+
+    BeautifulSoup types an attribute as ``str | AttributeValueList | None``
+    (multi-valued attributes such as ``class`` return a list); we only want the
+    scalar text form.
+    """
+    if node is None:
+        return ""
+    value = node.get(name)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return " ".join(str(part) for part in value)
 
 
 class EngineBlockedError(Exception):
@@ -60,16 +79,16 @@ class BaseParser:
         raise NotImplementedError
 
     @staticmethod
-    def _text(node) -> str:
+    def _text(node: Tag | None) -> str:
         """Return collapsed inner text of a BeautifulSoup node."""
         if node is None:
             return ""
         return re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
 
     @staticmethod
-    def _abs_url(node, base_url: str) -> str:
+    def _abs_url(node: Tag | None, base_url: str) -> str:
         """Resolve a possibly-relative href to an absolute URL."""
-        href = node.get("href", "") if node else ""
+        href = _attr(node, "href")
         if not href:
             return ""
         return urljoin(base_url, href)

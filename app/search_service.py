@@ -19,12 +19,13 @@ import asyncio
 import logging
 import random
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from app.cache import SearchCache
 from app.config import Settings
 from app.engine_manager import AllEnginesQuarantinedError, EngineManager
-from app.models import SearchResponse, SearchResult
+from app.models import SearchResponse
 from drivers.browser_driver import BrowserDriver
 from drivers.parsers import EngineBlockedError, get_parser
 
@@ -88,10 +89,8 @@ class SearchService:
     async def stop(self) -> None:
         if self._worker_task is not None:
             self._worker_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._worker_task
-            except asyncio.CancelledError:
-                pass
             self._worker_task = None
 
     @property
@@ -195,6 +194,10 @@ class SearchService:
             url = parser.search_url(job.query, job.max_results)
             try:
                 html, status = await self._driver.fetch_html(url)
+                if html is None:
+                    # Navigation failed with nothing to parse - treat it exactly
+                    # like a block so the engine is quarantined and we rotate.
+                    raise EngineBlockedError(engine, "empty-response")
                 block_reason = parser.detect_block(html, status)
                 if block_reason is not None:
                     raise EngineBlockedError(engine, block_reason)

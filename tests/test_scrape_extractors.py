@@ -66,12 +66,12 @@ def test_parse_sitemap_maps_loc_entries() -> None:
       <url><loc>https://example.com/c</loc></url>
     </urlset>"""
     links = parse_sitemap(xml, max_links=60)
-    assert [l.url for l in links] == [
+    assert [link.url for link in links] == [
         "https://example.com/a",
         "https://example.com/b",
         "https://example.com/c",
     ]
-    assert all(isinstance(l, LinkItem) for l in links)
+    assert all(isinstance(item, LinkItem) for item in links)
 
 
 def test_parse_sitemap_index_and_cap() -> None:
@@ -103,21 +103,25 @@ def test_extract_text_character_cap() -> None:
 
 def test_extract_links_resolve_dedupe_and_flag_same_domain() -> None:
     links = extract_links(PAGE_HTML, "https://example.com/", max_links=60)
-    urls = [l.url for l in links]
+    urls = [link.url for link in links]
 
     assert "https://example.com/relative" in urls  # relative resolved
     assert urls.count("https://example.com/relative") == 1  # deduplicated
     assert "https://example.com/nav" in urls
     assert "https://other.example.com/x" in urls
 
-    rel = next(l for l in links if l.url == "https://example.com/relative")
-    ext = next(l for l in links if l.url == "https://other.example.com/x")
+    rel = next(x for x in links if x.url == "https://example.com/relative")
+    ext = next(x for x in links if x.url == "https://other.example.com/x")
     assert rel.same_domain is True
     assert rel.anchor_text == "Relative link"
     assert ext.same_domain is False
 
     # Non-navigable targets are skipped entirely.
-    assert not any(l.url.startswith(("mailto:", "javascript:")) or l.url == "https://example.com/#fragment" for l in links)
+    assert not any(
+        x.url.startswith(("mailto:", "javascript:"))
+        or x.url == "https://example.com/#fragment"
+        for x in links
+    )
 
 
 def test_extract_links_caps_output() -> None:

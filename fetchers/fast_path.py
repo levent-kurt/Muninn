@@ -9,8 +9,8 @@ hard byte cap so one hostile response cannot exhaust memory.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import httpx
 
@@ -77,9 +77,8 @@ class FastPathFetcher:
     async def fetch(self, url: str) -> FastPathResult:
         client = self._make_client()
         try:
-            async with client:
-                async with client.stream("GET", url) as resp:
-                    body = await self._read_bounded(resp)
+            async with client, client.stream("GET", url) as resp:
+                body = await self._read_bounded(resp)
         except httpx.HTTPError as exc:
             raise FastPathError(f"fast-path fetch failed for {url}: {exc}") from exc
 

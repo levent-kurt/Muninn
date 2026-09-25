@@ -37,10 +37,10 @@ class ScrapeService:
         self,
         settings: Settings,
         *,
-        fetcher: "FastPathFetcher",
-        politeness: "HostPoliteness",
-        cache: "ScrapeCache",
-        browser_pool: "BrowserPoolManager",
+        fetcher: FastPathFetcher,
+        politeness: HostPoliteness,
+        cache: ScrapeCache,
+        browser_pool: BrowserPoolManager,
     ) -> None:
         self._settings = settings
         self._fetcher = fetcher

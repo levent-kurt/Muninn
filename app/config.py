@@ -1,4 +1,4 @@
-"""Environment-driven global configuration for StealthSearch.
+"""Environment-driven global configuration for Muninn.
 
 Every tunable (throttle delays, quarantine durations, cache TTL, browser
 settings) lives here and can be overridden with an environment variable so the
@@ -84,8 +84,11 @@ class Settings:
     # A page whose raw HTML exceeds this is "large" for the thin-text rule.
     text_anomaly_html_bytes: int = field(default_factory=lambda: _env_int("TEXT_ANOMALY_HTML_BYTES", 20_480))
 
-    # Scrape result cache (URL-keyed, TTL).
+    # Scrape result cache (URL+render keyed, TTL, bounded LRU).
     scrape_cache_ttl: int = field(default_factory=lambda: _env_int("SCRAPE_CACHE_TTL", 3_600))
+    scrape_cache_max_entries: int = field(
+        default_factory=lambda: _env_int("SCRAPE_CACHE_MAX_ENTRIES", 2_000)
+    )
 
     # Fast-path (plain HTTP) fetch.
     scrape_fast_path_timeout: float = field(default_factory=lambda: _env_float("SCRAPE_FAST_PATH_TIMEOUT", 20.0))

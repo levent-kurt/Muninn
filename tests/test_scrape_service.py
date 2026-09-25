@@ -240,7 +240,7 @@ async def test_scrape_sitemap_returns_loc_links() -> None:
     resp = await service.scrape(url)
     assert resp.rendered is False
     assert resp.text == ""
-    assert [l.url for l in resp.links] == ["https://example.com/a", "https://example.com/b"]
+    assert [x.url for x in resp.links] == ["https://example.com/a", "https://example.com/b"]
     assert pool.calls == []
 
 

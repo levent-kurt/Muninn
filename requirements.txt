@@ -1,11 +1,24 @@
-fastapi>=0.115
-uvicorn[standard]>=0.32
+# Runtime dependencies for the Muninn gateway.
+# Versions are pinned (==) so a fresh install reproduces a tested environment.
+# Update deliberately: change the pin, then run `make check` (lint + types + tests).
+
+fastapi==0.141.1
+starlette==1.7.0
+pydantic==2.13.5
+uvicorn[standard]==0.54.0
+
+# Outbound HTTP (fast-path fetcher) and the SQLite cache.
+httpx==0.28.1
+certifi==2026.7.22
+aiosqlite==0.22.1
+
+# Stealth browser. The Playwright *package* is pinned here; the matching browser
+# revision is pinned in pyproject.toml under [tool.muninn.playwright] and is
+# installed with `make browsers` / `python -m playwright install chromium`.
 playwright==1.63.0
 playwright-stealth==2.0.3
-beautifulsoup4>=4.12
-lxml>=5.3
-trafilatura>=2.0
-aiosqlite>=0.20
-httpx>=0.27
-pytest>=8.0
-pytest-asyncio>=0.24
+
+# HTML parsing / text extraction.
+beautifulsoup4==4.15.0
+lxml==6.1.3
+trafilatura==2.2.0

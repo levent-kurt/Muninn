@@ -15,7 +15,6 @@ from app.main import create_app
 from tests.conftest import FakeDriver, make_test_settings
 from tests.html_fixtures import ENGINE_RESULTS_HTML
 
-
 # --------------------------------------------------------------------------- /search
 
 
@@ -143,5 +142,5 @@ def test_status_endpoint_shape(client: TestClient) -> None:
 
 def test_root_metadata(client: TestClient) -> None:
     body = client.get("/").json()
-    assert body["service"] == "StealthSearch API Gateway"
+    assert body["service"] == "Muninn API Gateway"
     assert "/search" in body["endpoints"]

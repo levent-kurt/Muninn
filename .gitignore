@@ -17,6 +17,14 @@ data/screenshots/
 data/scrape-worker.log
 !data/.gitkeep
 
+# --- Local-only working documents ------------------------------------------
+# Internal planning/audit docs and agent scratch files: kept on this machine,
+# never published to the repository.
+TODO*.md
+SPEC.md
+REPORT.md
+opencode.txt
+
 # --- Editors / OS ---------------------------------------------------------
 .DS_Store
 .idea/

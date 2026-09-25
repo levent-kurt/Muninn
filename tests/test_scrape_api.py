@@ -92,13 +92,12 @@ def _make_app(handler, pool: StubPool):
             transport=httpx.MockTransport(handler), follow_redirects=True
         ),
     )
-    app = create_app(
+    return create_app(
         settings=settings,
         driver_factory=lambda s: FakeDriver(),
         scrape_fetcher_factory=lambda s: fetcher,
         scrape_pool_factory=lambda s: pool,
     )
-    return app
 
 
 # --------------------------------------------------------------------------- /scrape

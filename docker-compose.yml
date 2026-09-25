@@ -1,10 +1,10 @@
 version: "3.9"
 
 services:
-  stealthsearch:
+  muninn:
     build: .
-    image: stealthsearch:latest
-    container_name: stealthsearch
+    image: muninn:latest
+    container_name: muninn
     ports:
       - "${PORT:-8000}:8000"
     environment:
@@ -37,7 +37,7 @@ services:
 
   scrape-worker:
     build: .
-    image: stealthsearch:latest
+    image: muninn:latest
     container_name: scrape-worker
     # Standalone stealth-browser render process, decoupled from the API. It is
     # supervised by Docker (restart: always); Chromium inside it is
