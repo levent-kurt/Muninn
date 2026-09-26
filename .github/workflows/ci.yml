@@ -109,10 +109,16 @@ jobs:
           done
           [ "$(docker inspect -f '{{.State.Health.Status}}' muninn-ci)" = "healthy" ]
           # The published port must not be world-reachable by default.
-          docker run --rm muninn:ci id -u | grep -qv '^0$' || {
-            echo "container runs as root"; exit 1; }
-        finally: docker rm -f muninn-ci || true
+          uid=$(docker run --rm muninn:ci id -u)
+          echo "container uid: $uid"
+          [ "$uid" != "0" ] || { echo "container runs as root"; exit 1; }
+          # The API must actually answer on the documented port.
+          curl -fsS --max-time 10 "http://127.0.0.1:8010/health/live" || exit 1
 
       - name: Container logs
         if: always()
         run: docker logs muninn-ci || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f muninn-ci 2>/dev/null || true
