@@ -91,6 +91,36 @@ follow `SECURITY.md` instead - do not open a public issue.
 The engine joins the existing circuit breaker and round-robin rotation with no
 further changes.
 
+## When an existing engine stops returning results
+
+Search engines change their markup without notice, and a parser that matched
+last quarter can silently start returning zero results. This is the one failure
+mode that no offline test can catch, because the tests run against saved HTML.
+
+Check it in this order:
+
+1. Run the live probe — it exercises all four engines with one real query:
+
+   ```bash
+   LIVE=1 python scripts/live_probe.py "python web scraping"
+   ```
+
+   It prints a per-engine result count and the first hit, so a broken parser is
+   obvious. This sends four real requests to search engines from your IP, which
+   is why it is opt-in and why the default settings throttle it.
+
+2. If an engine returns `0 results`, its `parse()` selectors no longer match.
+   Fetch the search URL, save the response into `tests/html_fixtures.py`, and
+   fix the CSS selectors in that engine's parser. **Refresh the fixture while
+   you are there** — the offline tests are only as good as the HTML they were
+   written against, and a stale fixture hides exactly the bug you just found.
+
+3. If an engine returns a block page, that is the circuit breaker working: the
+   engine is quarantined (30 minutes, then 12 hours) and `/status` shows it.
+   Check `BLOCK_SIGNATURES` for that engine.
+
+All four parsers were last verified against live markup on **2026-09-26**.
+
 ## Code of conduct
 
 Be decent to each other. See `CODE_OF_CONDUCT.md`.

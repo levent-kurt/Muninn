@@ -86,7 +86,7 @@ under systemd or launchd.
 
 ### Notes
 
-- The requirements are fully pinned and the suite is hermetic: 186 tests, no
+- The requirements are fully pinned and the suite is hermetic: 231 tests, no
   network and no browser, in about 8 seconds.
 - Platform support is Linux and macOS (the browser teardown uses POSIX process
   groups, `setsid` and `pgrep`/`ps`).

@@ -210,6 +210,7 @@ def create_app(
                 "/health/live": "GET cheap liveness probe",
                 "/health/ready": "GET readiness probe",
                 "/status": "GET engine + queue metrics",
+                "/metrics": "GET Prometheus metrics",
                 "/docs": "GET Swagger UI (DOCS_ENABLED, default on)",
                 "/redoc": "GET ReDoc reference view",
                 "/openapi.json": "GET the OpenAPI schema",

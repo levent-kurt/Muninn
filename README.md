@@ -268,8 +268,9 @@ curl "http://127.0.0.1:9999/search?q=python+web+scraping&max_results=5"
 }
 ```
 
-Status codes: `200` ok · `422` bad parameters · `503` every engine quarantined ·
-`504` timed out in the queue.
+Status codes: `200` ok · `422` bad parameters · `429` rate limited (with
+`Retry-After`) · `503` every engine quarantined **or** the queue is full
+(both with `Retry-After`) · `504` timed out in the queue.
 
 ### `GET /scrape` — fetch + extract a page
 
@@ -277,7 +278,7 @@ Status codes: `200` ok · `422` bad parameters · `503` every engine quarantined
 |------------|------|---------|----------------------------------------------------|
 | `url`      | url  | —       | required, `http(s)` only                            |
 | `render`   | 0/1  | `0`     | `1` forces the stealth browser                     |
-| `max_text` | int  | `32000` | 1–32000 body-text characters                        |
+| `max_text` | int  | `32000` | 1–200000 body-text characters (`MAX_TEXT_CAP`)      |
 
 ```bash
 curl "http://127.0.0.1:9999/scrape?url=https://example.com"

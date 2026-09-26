@@ -8,6 +8,8 @@ without touching a real browser or the network.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -241,3 +243,32 @@ def test_docs_can_be_disabled() -> None:
         for path in ("/docs", "/redoc", "/openapi.json"):
             assert c.get(path).status_code == 404, f"{path} should be disabled"
         assert c.get("/health/live").status_code == 200  # service still works
+
+
+def test_root_endpoint_list_matches_the_real_routes() -> None:
+    """`GET /` advertises the API surface; it must not drift from reality.
+
+    `/metrics` was added to the app and to the README while the root listing was
+    never updated, so the service's own self-description was incomplete.
+
+    The OpenAPI schema is the source of truth rather than ``app.routes``:
+    FastAPI 0.141 keeps ``include_router`` results as opaque ``_IncludedRouter``
+    entries instead of flattening them, so route introspection alone is not
+    reliable across versions.
+    """
+    # Framework-provided docs routes are not part of the service surface.
+    framework = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+
+    with TestClient(
+        create_app(settings=make_test_settings(), driver_factory=lambda s: FakeDriver())
+    ) as client:
+        advertised = set(client.get("/").json()["endpoints"])
+        spec_paths = set(client.get("/openapi.json").json()["paths"])
+
+    documented_operations = spec_paths - framework
+    unadvertised = documented_operations - advertised
+    # `/docs`, `/redoc` and `/openapi.json` are advertised too, and they only
+    # exist when DOCS_ENABLED is on, so they are allowed to be "missing".
+    missing = advertised - spec_paths - framework
+    assert not unadvertised, f"routes not listed by GET /: {sorted(unadvertised)}"
+    assert not missing, f"GET / advertises routes that do not exist: {sorted(missing)}"

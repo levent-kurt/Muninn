@@ -39,6 +39,13 @@ user. Read this section before exposing it to a network you do not control.
     changes between validation and connection (DNS rebinding) can still slip
     through. Fully closing this requires pinning the validated IP into the
     transport, which is not implemented.
+    - **When this stops being acceptable:** on a host anyone but you can reach -
+      a public VPS, a shared host, or any deployment behind `--host 0.0.0.0` on
+      a network you do not fully control. There, `127.0.0.1` is other tenants'
+      services and cloud instance metadata is reachable, so "send me a URL"
+      becomes "read internal HTTP". On a private network the guard is doing
+      accident-prevention, which it does well; do not treat it as a security
+      boundary there.
 - **robots.txt.** With `SCRAPE_RESPECT_ROBOTS=true` (the default) each target is
   checked against its origin's `robots.txt` and disallowed paths are refused
   with HTTP 403. An unreachable or missing `robots.txt` fails open.
@@ -62,33 +69,45 @@ documenting the boundary clearly.
 - **No authentication or authorization.** Every endpoint - `/search`,
   `/scrape`, `/status` - is open to anyone who can reach the port. There is no
   user model, no API key, and no per-tenant accounting.
-  - The service therefore **binds to `127.0.0.1` by default**, and the
-    started as a service, it inherits that protection.
+  - The service therefore **binds to `127.0.0.1` by default**. The documented
+    production command and `deploy/muninn-api.service` override that with
+    `--host 0.0.0.0`, which removes the protection - see the hardening checklist
+    before doing so.
   - `/docs`, `/redoc` and `/openapi.json` are **served by default**. They are
     documentation, not data, but the schema describes every available operation
     — set `DOCS_ENABLED=0` on any deployment you do not control.
   - If you need it reachable from elsewhere, put it behind a reverse proxy that
     does the authentication, or build authentication into your own fork. That is
     your responsibility, not the project's.
-- **No rate limiting on `/search`, and the search queue is unbounded.** Each
-  request waits at most `REQUEST_TIMEOUT_SECONDS`, so the queue drains eventually,
-  but an anonymous caller can grow it faster than the 15–30s throttler empties
-  it. `POST` a rate limit in front of `/search` if you expose it.
+- **Rate limits are coarse, not a control against a deliberate attacker.**
+  Both endpoints have a bounded per-client token bucket
+  (`SEARCH_RATE_LIMIT_PER_MINUTE`, default 30; `SCRAPE_RATE_LIMIT_PER_MINUTE`,
+  default 60) and the search queue is bounded (`MAX_SEARCH_QUEUE`, default 100),
+  so one client cannot monopolise the browser or grow the backlog. Requests that
+  hit a limit get `429` or `503` with `Retry-After`. The keys are peer IPs,
+  which are trivially spoofed behind a proxy and shared by everyone behind NAT.
+  They keep an accidental flood out; if the service faces a hostile network,
+  rate-limit at the proxy as well.
 - **DNS rebinding**, as described above.
 - **Sandbox-escape hardening.** Chromium is launched with `--no-sandbox` by
-  default (`BROWSER_NO_SANDBOX`), which is what makes it work in minimal
-  containers. Combined with a browser that visits attacker-controlled pages,
-  keep the container unprivileged and its filesystem read-only, as
-  service manager does. Set `BROWSER_NO_SANDBOX=false` and grant the
-  sandbox the capabilities it needs if your environment allows it.
+  default (`BROWSER_NO_SANDBOX`), because its sandbox is unreliable under a
+  service manager. Combined with a browser that visits attacker-controlled
+  pages, that means a Chromium escape is a compromise of the service account -
+  so run Muninn as an unprivileged user, never as root. Set
+  `BROWSER_NO_SANDBOX=false` if your host lets Chromium keep its sandbox.
 
 ## Hardening checklist for internet-facing deployments
 
-1. Keep the API on `127.0.0.1` behind an authenticating reverse proxy.
+1. Keep the API on `127.0.0.1` behind an authenticating reverse proxy. If you
+   must bind `0.0.0.0`, put a firewall in front of port 9999 as well.
 2. Leave `SCRAPE_RESPECT_ROBOTS=true`.
 3. Leave `SCRAPE_ALLOW_PRIVATE_TARGETS=false` and `SCRAPE_ALLOWED_HOSTS` empty.
 4. Set `DOCS_ENABLED=0`.
-5. Rate-limit `/search` at the proxy; it has no built-in limit.
-6. Keep the container unprivileged with a read-only root filesystem and
-   `cap_drop: ALL`.
-7. Keep `SCRAPE_RATE_LIMIT_PER_MINUTE` at or below the default.
+5. Rate-limit at the proxy as well. The built-in limits are keyed on peer IPs,
+   which are spoofable behind a proxy and shared behind NAT.
+6. Run it as an unprivileged account (see `deploy/muninn-api.service`), never
+   as root, given `--no-sandbox` is on by default.
+7. Keep `SCRAPE_RATE_LIMIT_PER_MINUTE` and `SEARCH_RATE_LIMIT_PER_MINUTE` at or
+   below their defaults, and leave `MAX_SEARCH_QUEUE` at its default.
+8. Do not expose `/metrics` beyond a trusted network: it publishes traffic
+   volumes and latency shape.
