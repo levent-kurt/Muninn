@@ -58,6 +58,7 @@ per-host politeness and a bounded TTL cache.
 7. [Legal & ethical use](#7-legal--ethical-use)
 8. [Development](#8-development)
 9. [Project layout](#9-project-layout)
+10. [Troubleshooting](#10-troubleshooting)
 
 ---
 
@@ -67,45 +68,81 @@ per-host politeness and a bounded TTL cache.
 `pgrep`/`ps` to tear its browser down without leaving orphans, so **Windows is
 not supported**.
 
-**Python 3.10+** (3.12 recommended).
+**Python 3.10+** (3.12 recommended on macOS; Ubuntu 22.04's stock 3.10 is
+fine).
+
+### The short version (Linux and macOS)
+
+```bash
+git clone https://github.com/levent-kurt/Muninn.git
+cd Muninn
+make setup        # venv + dependencies + Chromium + its OS libraries
+make run          # http://127.0.0.1:9999/docs
+```
+
+`make setup` is the whole first-run path. On Linux the `browser-deps` step needs
+`sudo`; on macOS it is a no-op and you will be asked to allow incoming
+connections the first time Chromium starts.
+
+If you prefer to do it by hand, or you already have a virtualenv, the four
+steps behind `setup` are:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate   # make venv
+make install          # pip install -r requirements.txt -r requirements-dev.txt
+make browser-deps     # OS libraries Chromium needs (Linux, needs sudo)
+make browsers         # download the Chromium build Playwright expects
+```
+
+`make browsers` and `make browser-deps` are **not** interchangeable:
+`browsers` downloads the browser, `browser-deps` installs the system libraries
+it links against. You need both on a bare Linux box.
 
 ### macOS (Homebrew)
 
 ```bash
 brew install python@3.12
-
-git clone https://github.com/leventkurt/muninn.git
-cd muninn
-python3.12 -m venv .venv
-source .venv/bin/activate
-make install         # or: pip install -r requirements.txt
-make browsers        # download the pinned Chromium build
 ```
 
-> The first browser launch may ask to accept incoming network connections for
-> the Chromium helper; allow it.
+then follow the four steps above with `python3.12` in place of `python3`.
 
 ### Ubuntu / Debian (Linux)
 
+Ubuntu 22.04 ships **Python 3.10**, which satisfies Muninn's `>=3.10`
+requirement, so nothing extra is needed:
+
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3.12 python3.12-venv
-python3 -m playwright install-deps chromium   # or: make browsers
-
-git clone https://github.com/leventkurt/muninn.git
-cd muninn
-python3.12 -m venv .venv
-source .venv/bin/activate
-make install
+sudo apt-get install -y python3 python3-venv git make
 ```
+
+then follow the four steps above. If you would rather use 3.12, add the
+[deadsnakes](https://github.com/deadsnakes/ppa) PPA first — `apt-get install
+python3.12` fails on stock 22.04 because the package does not exist there.
+
+On a minimal or headless server you may also need:
+
+```bash
+sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+                        libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
+                        libxfixes3 libxrandr2 libgbm1 libasound2
+```
+
+(`make browser-deps` installs these for you; they are listed here only for
+locked-down images where you manage packages yourself.)
 
 ### Docker (any OS)
 
 ```bash
-git clone https://github.com/leventkurt/muninn.git
-cd muninn
-docker compose up -d
+git clone https://github.com/levent-kurt/Muninn.git
+cd Muninn
+docker compose up -d --build
 ```
+
+Everything Chromium needs is inside the image, so there is no host Python or
+browser setup. The stack builds natively for your machine's architecture
+(`linux/amd64` or `linux/arm64`); see
+[Troubleshooting](#troubleshooting) if you hit a platform mismatch.
 
 This starts two containers from one image: `muninn` (the API, published on
 `127.0.0.1:9999`) and `scrape-worker` (the browser pool, reachable only on the
@@ -119,6 +156,15 @@ internal network).
 
 ```bash
 make run      # uvicorn with reload on 127.0.0.1:9999
+```
+
+`make run` reloads on save. `make serve` runs without the reloader and reads
+`HOST`/`PORT` from the environment (via `app/config.py`) instead of from the
+Makefile.
+
+```bash
+curl http://127.0.0.1:9999/health/live
+open http://127.0.0.1:9999/docs      # Swagger UI
 ```
 
 ### With Docker Compose
@@ -446,6 +492,99 @@ docker-compose.yml        API + scrape-worker deployment
 Makefile                  install / lint / typecheck / test / run targets
 pyproject.toml            project metadata, ruff, mypy and pytest configuration
 ```
+
+---
+
+## 10. Troubleshooting
+
+Failures a fresh clone on a new machine actually hits.
+
+### `ImportError: lxml.html.clean module is now a separate project lxml_html_clean`
+
+A dependency is missing. The import chain `trafilatura -> justext ->
+lxml.html.clean` needs `lxml_html_clean`, but no package declares it as a hard
+requirement, so it must be installed explicitly. `requirements.txt` pins it and
+a test asserts the pin stays.
+
+```bash
+pip install "lxml_html_clean==0.4.5"     # or: make install
+```
+
+Installing with `pip install --no-deps`, or into a pre-existing environment, is
+the usual way to end up without it.
+
+### `Executable doesn't exist at ~/.cache/ms-playwright/...`
+
+The Chromium build was never downloaded, or it was downloaded for a different
+platform.
+
+```bash
+make browsers         # playwright install chromium
+```
+
+### Chromium fails to start on Linux: missing shared libraries
+
+The OS libraries Chromium links against are absent. `make browsers` does **not**
+install these - `make browser-deps` does, and it needs `sudo`.
+
+```bash
+make browser-deps
+```
+
+### `docker compose up` fails with a platform mismatch
+
+```
+The requested image's platform (linux/arm64) does not match the detected host
+platform (linux/amd64/v3) and no specific platform was requested
+```
+
+A local image tagged `muninn:latest` was built on a **different machine**
+(typically an Apple-silicon laptop) and compose reused it instead of building
+from the current directory. Both services now set `pull_policy: build`, so this
+should not recur; on an older checkout:
+
+```bash
+docker compose down --rmi local     # drop the cached local image
+docker compose up -d --build
+```
+
+See what is in the cache:
+
+```bash
+docker image inspect muninn:latest --format '{{.Os}}/{{.Architecture}}'
+```
+
+Muninn deliberately does **not** hardcode a `platform:`, so the stack builds
+natively on both amd64 and arm64. If you must cross-build, do it explicitly
+rather than committing the platform to the file:
+
+```bash
+docker buildx build --platform linux/amd64 -t muninn:latest .
+```
+
+### `apt-get install python3.12` says "Unable to locate package"
+
+You are on Ubuntu 22.04, whose default repositories ship Python 3.10 - which
+Muninn supports. Use `python3` / `python3-venv`, or add the deadsnakes PPA if you
+specifically want 3.12.
+
+### The container is reported unhealthy
+
+`python:3.12-slim` ships no `curl`, so the healthcheck probes with the
+interpreter. If it has been replaced with a `curl` probe it can never pass.
+
+```bash
+docker inspect --format '{{.State.Health.Status}}' muninn
+docker compose logs muninn | tail -40
+```
+
+### Port already in use
+
+```bash
+PORT=10000 docker compose up -d      # or: PORT=10000 make serve
+```
+
+---
 
 ## License
 

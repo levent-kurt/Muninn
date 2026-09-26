@@ -14,7 +14,11 @@ MYPY    = $(BIN)/mypy
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-13s\033[0m %s\n", $$1, $$2}'
+
+setup: venv install browser-deps browsers ## Everything a fresh clone needs (Linux/macOS)
+	@echo ""
+	@echo "Ready. Start the API with: make run   ->  http://127.0.0.1:9999/docs"
 
 venv: ## Create the virtualenv (Python 3.10+)
 	$(PYTHON) -m venv $(VENV)
@@ -23,8 +27,11 @@ venv: ## Create the virtualenv (Python 3.10+)
 install: ## Install runtime + dev dependencies
 	$(PIP) install -r requirements.txt -r requirements-dev.txt
 
-browsers: ## Download the pinned Chromium build
+browsers: ## Download the Chromium build Playwright expects
 	$(BIN)/python -m playwright install chromium
+
+browser-deps: ## Install the OS libraries Chromium needs (Linux only, needs sudo)
+	$(BIN)/python -m playwright install-deps chromium
 
 check: lint typecheck test ## Everything CI runs
 

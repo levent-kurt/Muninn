@@ -6,6 +6,50 @@ All notable changes to Muninn are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lxml_html_clean` was missing from the requirements.** The import chain
+  `trafilatura → justext → lxml.html.clean` needs it at runtime, but no
+  distribution declares it as a hard requirement — `lxml` ships it only as the
+  optional extra `html-clean`. A fresh install could therefore fail at import
+  with *"lxml.html.clean module is now a separate project lxml_html_clean"*.
+  Now pinned explicitly, with a comment explaining why it must not be removed.
+- **`docker compose up` failed with a platform mismatch** on a host whose
+  architecture differed from the cached image, because both services set
+  `image: muninn:latest` and compose reused whatever that tag pointed at instead
+  of building from the working directory. Both services now set
+  `pull_policy: build`, so the image always matches the local build context. No
+  `platform:` is hardcoded, so the stack still builds natively on amd64 and
+  arm64.
+- **README Ubuntu instructions could not work on Ubuntu 22.04.** They asked for
+  `apt-get install python3.12`, which is not in 22.04's repositories (deadsnakes
+  is required). The project supports Python 3.10+, which 22.04 ships, so the
+  instructions now use `python3` and mention the PPA only as an option.
+- **README conflated two different commands**, suggesting
+  `playwright install-deps` was interchangeable with `make browsers`. Downloading
+  the browser and installing the OS libraries it links against are separate
+  steps; both are now spelled out.
+- **Repository URLs were wrong** in `pyproject.toml`, `CHANGELOG.md` and the
+  OpenAPI contact/license fields (`leventkurt/muninn` instead of
+  `levent-kurt/Muninn`).
+
+### Added
+
+- `make setup` — the whole first-run path: virtualenv, dependencies, Chromium
+  and its OS libraries.
+- `make browser-deps` — installs the OS libraries Chromium needs on Linux
+  (needs `sudo`), previously folded into `make browsers`.
+- A **Troubleshooting** section in the README covering the missing-CA-import,
+  missing browser, missing shared libraries, platform mismatch, unavailable
+  `python3.12`, unhealthy container and port-in-use cases.
+- `tests/test_deploy_manifests.py` — guards the deployment manifest: compose
+  must rebuild rather than trust a stale tag, must not hardcode a platform, must
+  not probe with `curl`, the container must not run as root, and every
+  requirement must be pinned (including the phantom `lxml_html_clean`).
+- `schemas/common.py` with an `ErrorResponse` model, so the `{"detail": ...}`
+  body every 4xx/5xx returns is described in the OpenAPI schema rather than
+  being implicit.
+
 ### Changed
 
 - **Default port moved from `8000` to `9999`.** The application, the Docker
@@ -18,12 +62,8 @@ All notable changes to Muninn are documented here. The format follows
   `DOCS_ENABLED=0` to turn the schema off on deployments you do not control.
 - Corrected a false claim in `SECURITY.md`: the `/search` queue is **not**
   bounded, and `/search` has no rate limit.
-
-### Added
-
-- `schemas/common.py` with an `ErrorResponse` model, so the `{"detail": ...}`
-  body every 4xx/5xx returns is described in the OpenAPI schema rather than
-  being implicit.
+- `python -m app.main` (`make serve`) now serves on `Settings.host`/`Settings.port`;
+  previously `HOST`/`PORT` were ignored by the default launch path.
 
 ## [0.1.0] - 2026-09-26
 
@@ -74,5 +114,5 @@ stealth-browser scrape pool.
 - `MIT` license. The service is explicitly single-user and unauthenticated; see
   `SECURITY.md` for the threat model.
 
-[Unreleased]: https://github.com/leventkurt/muninn/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/leventkurt/muninn/releases/tag/v0.1.0
+[Unreleased]: https://github.com/levent-kurt/Muninn/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/levent-kurt/Muninn/releases/tag/v0.1.0

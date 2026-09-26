@@ -21,4 +21,11 @@ playwright-stealth==2.0.3
 # HTML parsing / text extraction.
 beautifulsoup4==4.15.0
 lxml==6.1.3
+# lxml_html_clean is a PHANTOM transitive dependency: the import chain
+# trafilatura -> justext -> lxml.html.clean needs it at runtime, but no
+# distribution declares it as a hard requirement (lxml ships it only as the
+# optional extra "html-clean"). Omit this line and `import trafilatura` fails
+# with "lxml.html.clean module is now a separate project lxml_html_clean".
+# Do not remove it as redundant.
+lxml_html_clean==0.4.5
 trafilatura==2.2.0

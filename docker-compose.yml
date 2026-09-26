@@ -8,6 +8,12 @@ services:
   muninn:
     build: .
     image: muninn:latest
+    # Always rebuild from ./ instead of trusting whatever `muninn:latest` is in
+    # the local image cache. Without this, a tag built on another machine (e.g.
+    # arm64 on an Apple laptop) is reused on a different host and compose fails
+    # with "The requested image's platform (linux/arm64) does not match the
+    # detected host platform (linux/amd64/v3)".
+    pull_policy: build
     container_name: muninn
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-9999}:9999"
@@ -56,6 +62,7 @@ services:
   scrape-worker:
     build: .
     image: muninn:latest
+    pull_policy: build
     container_name: scrape-worker
     # Standalone stealth-browser render process, decoupled from the API. It is
     # supervised by Docker (restart: always); Chromium inside it is
