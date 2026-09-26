@@ -28,6 +28,11 @@ user. Read this section before exposing it to a network you do not control.
   returned address is checked. Non-`http(s)` schemes are rejected. This is
   enforced twice: in the API and again in the scrape worker, which does not
   trust its caller.
+  - **Redirects are followed by hand and every hop is re-validated**, capped at
+    `SCRAPE_MAX_REDIRECTS`. Letting the HTTP client follow them would make the
+    guard first-hop-only, so a public host answering `302 Location:
+    http://169.254.169.254/` could reach the metadata service. A rejected
+    redirect target is reported as `400`, not as a transport failure.
   - Escape hatches, for operators who need them:
     `SCRAPE_ALLOW_PRIVATE_TARGETS=true` or an `SCRAPE_ALLOWED_HOSTS` allowlist.
   - Known limitation: the check is pre-flight, so a hostname whose DNS answer

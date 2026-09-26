@@ -339,8 +339,11 @@ Everything is an environment variable; the full list with defaults lives in
 | `THROTTLE_MAX_DELAY` | `30` | Max seconds between outbound searches |
 | `QUARANTINE_FIRST_SECONDS` | `1800` | 1st 429/CAPTCHA → quarantine |
 | `QUARANTINE_ESCALATED_SECONDS` | `43200` | 2nd consecutive failure → quarantine |
-| `DEFAULT_MAX_RESULTS` / `MAX_MAX_RESULTS` | `10` / `50` | `max_results` default and cap |
+| `DEFAULT_MAX_RESULTS` | `10` | Default value for `max_results` |
+| `MAX_MAX_RESULTS` | `50` | Hard cap for `max_results` |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Max time `/search` waits in the queue |
+| `MAX_SEARCH_QUEUE` | `100` | Search queue depth; deeper requests get `503` + `Retry-After` |
+| `SEARCH_RATE_LIMIT_PER_MINUTE` | `30` | Per-client `/search` budget; excess gets `429` |
 
 ### Browser
 
@@ -351,7 +354,8 @@ Everything is an environment variable; the full list with defaults lives in
 | `BROWSER_NO_SANDBOX` | `true` | Adds `--no-sandbox`. Set `false` to keep Chromium's sandbox |
 | `PAGE_LOAD_TIMEOUT_MS` | `45000` | Per-page load budget |
 | `NAVIGATION_TIMEOUT_MS` | `60000` | `page.goto` timeout |
-| `USER_AGENT` / `LOCALE` | Chrome UA / `en-US` | Browser identity |
+| `USER_AGENT` | Chrome UA | Browser identity (overrides the default UA) |
+| `LOCALE` | `en-US` | Browser locale |
 
 ### Scrape module
 
@@ -359,7 +363,8 @@ Everything is an environment variable; the full list with defaults lives in
 |---|---|---|
 | `SCRAPE_WORKER_MODE` | `subprocess` | `subprocess` (API supervises) or `external` (own service) |
 | `SCRAPE_WORKER_URL` | *(derived)* | External worker base URL |
-| `SCRAPE_WORKER_HOST` / `_PORT` | `127.0.0.1` / `8765` | Where the spawned worker binds |
+| `SCRAPE_WORKER_HOST` | `127.0.0.1` | Where the spawned worker binds |
+| `SCRAPE_WORKER_PORT` | `8765` | Port the spawned worker binds |
 | `SCRAPE_WORKER_STARTUP_TIMEOUT` | `30.0` | Seconds to wait for a spawned worker |
 | `SCRAPE_WORKER_LOG_FILE` | `data/scrape-worker.log` | Worker log destination |
 | `BROWSER_IDLE_TIMEOUT` | `300` | Shut the scrape browser down after N idle seconds |
@@ -367,7 +372,9 @@ Everything is an environment variable; the full list with defaults lives in
 | `SCRAPE_RENDER_TIMEOUT` | `45.0` | Max seconds per render job |
 | `SCRAPE_FAST_PATH_TIMEOUT` | `20.0` | Fast-path HTTP read timeout |
 | `SCRAPE_MAX_BODY_BYTES` | `10000000` | Hard cap on fetched/rendered HTML |
+| `SCRAPE_MAX_REDIRECTS` | `5` | Redirect hops followed; each hop is re-validated |
 | `DEFAULT_MAX_TEXT` | `32000` | Default extracted-text cap |
+| `MAX_TEXT_CAP` | `200000` | Hard ceiling on a caller's `max_text` |
 | `MAX_LINKS_CAP` | `60` | Max links per response |
 | `TEXT_MIN_CHAR_THRESHOLD` | `200` | Below this (on a large shell) → block-suspect |
 | `TEXT_ANOMALY_HTML_BYTES` | `20480` | HTML size where the thin-text rule applies |

@@ -66,6 +66,10 @@ class ScrapeService:
             )
         )
         self._validator = validator or self._default_validator
+        # The fetcher follows redirects itself, so hand it the same policy: a
+        # redirect target must clear the same SSRF guard as the caller's URL.
+        # Without this the guard would only ever see the first hop.
+        self._fetcher.set_validator(self._validate_target)
 
     async def _default_validator(self, url: str) -> str:
         return await validate_target_url(
@@ -73,6 +77,10 @@ class ScrapeService:
             allow_private=self._settings.scrape_allow_private_targets,
             allowed_hosts=self._settings.scrape_allowed_hosts,
         )
+
+    def _validate_target(self, url: str) -> Awaitable[str]:
+        """Bound validator, so it can be passed to the fetcher as a callable."""
+        return self._validator(url)
 
     # -- public ---------------------------------------------------------------
 

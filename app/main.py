@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -23,13 +25,13 @@ from app.config import SUPPORTED_ENGINES, Settings, get_settings
 from app.engine_manager import AllEnginesQuarantinedError, EngineManager
 from app.engine_state_store import EngineStateStore
 from app.models import SearchResponse
-from app.search_service import SearchService
+from app.search_service import SearchQueueFullError, SearchService
 from browser_pool.manager import BrowserPoolManager
 from drivers.browser_driver import BrowserDriver, BrowserDriverError
 from fetchers.fast_path import FastPathFetcher
 from ops.cache import ScrapeCache
 from ops.politeness import HostPoliteness
-from ops.ratelimit import RateLimiter
+from ops.ratelimit import RateLimiter, RateLimitExceeded
 from routers.health import router as health_router
 from routers.scrape import router as scrape_router
 from schemas.common import ErrorResponse
@@ -89,6 +91,7 @@ def create_app(
         )
         scrape_cache = ScrapeCache(settings.scrape_cache_ttl, settings.scrape_cache_max_entries)
         limiter = RateLimiter(settings.scrape_rate_limit_per_minute)
+        search_limiter = RateLimiter(settings.search_rate_limit_per_minute)
         scrape_service = ScrapeService(
             settings,
             fetcher=fetch,
@@ -110,6 +113,7 @@ def create_app(
         app.state.scrape_pool = pool
         app.state.scrape_cache = scrape_cache
         app.state.scrape_limiter = limiter
+        app.state.search_limiter = search_limiter
         app.state.started_at = time.time()
 
         yield
@@ -275,6 +279,24 @@ def create_app(
         if engine is not None:
             engine = engine.lower()
 
+        limiter: RateLimiter | None = getattr(request.app.state, "search_limiter", None)
+        if limiter is not None:
+            # Abuse protection, not authentication: the throttle already caps
+            # throughput, this stops one client filling the queue.
+            client = request.client.host if request.client else "unknown"
+            try:
+                await limiter.acquire(client)
+            except RateLimitExceeded as exc:
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": str(exc.retry_after)},
+                    content={
+                        "error": "rate_limited",
+                        "detail": str(exc),
+                        "retry_after": exc.retry_after,
+                    },
+                )
+
         service: SearchService = request.app.state.service
         try:
             response = await service.submit(
@@ -290,6 +312,12 @@ def create_app(
                     "error": "all_engines_quarantined",
                     "detail": "every search engine is under quarantine; try again later",
                 },
+            )
+        except SearchQueueFullError as exc:
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "5"},
+                content={"error": "queue_full", "detail": str(exc)},
             )
         except TimeoutError as exc:
             raise HTTPException(
@@ -353,6 +381,33 @@ def create_app(
 
     app.include_router(scrape_router)
     app.include_router(health_router)
+
+    # Unhandled exceptions: return a JSON envelope with a request id instead of
+    # Starlette's plain-text 500 and stack trace. The id is echoed in the
+    # response, put in the X-Request-Id header, and included in the log record,
+    # so an operator can find the traceback without exposing internals to the
+    # caller. Errors we raise deliberately (HTTPException and the explicit
+    # JSONResponse bodies) are unaffected - their documented shapes still stand.
+    @app.middleware("http")
+    async def request_id_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
+        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+        request.state.request_id = request_id
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("unhandled error [request_id=%s] %s %s",
+                             request_id, request.method, request.url.path)
+            return JSONResponse(
+                status_code=500,
+                headers={"X-Request-Id": request_id},
+                content={
+                    "error": "internal_error",
+                    "detail": "an unexpected error occurred",
+                    "request_id": request_id,
+                },
+            )
+        response.headers["X-Request-Id"] = request_id
+        return response
 
     return app
 

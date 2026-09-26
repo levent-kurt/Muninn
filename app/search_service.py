@@ -50,6 +50,7 @@ class Metrics:
     cache_misses: int = 0
     circuit_breaker_trips: int = 0
     requests_enqueued: int = 0
+    queue_rejections: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -58,7 +59,17 @@ class Metrics:
             "cache_misses": self.cache_misses,
             "circuit_breaker_trips": self.circuit_breaker_trips,
             "requests_enqueued": self.requests_enqueued,
+            "queue_rejections": self.queue_rejections,
         }
+
+
+class SearchQueueFullError(Exception):
+    """The search queue is at capacity; the caller should retry later.
+
+    Throughput is capped at roughly 2-4 requests/minute by the throttle, so an
+    unbounded queue only ever accumulates work that will time out. Refusing is
+    honest and keeps one client's burst from consuming the whole backlog.
+    """
 
 
 class SearchService:
@@ -76,7 +87,10 @@ class SearchService:
         self._cache = cache
         self._engines = engines
 
-        self._queue: asyncio.Queue[SearchJob] = asyncio.Queue()
+        # Bounded: see SearchQueueFullError.
+        self._queue: asyncio.Queue[SearchJob] = asyncio.Queue(
+            maxsize=max(1, settings.max_search_queue)
+        )
         self._worker_task: asyncio.Task | None = None
         self._last_fetch_started: float | None = None
         self.metrics = Metrics()
@@ -139,8 +153,14 @@ class SearchService:
             requested_engine=requested_engine,
             force_refresh=force_refresh,
         )
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull as exc:
+            self.metrics.queue_rejections += 1
+            raise SearchQueueFullError(
+                f"search queue is full ({self._queue.maxsize} requests); retry shortly"
+            ) from exc
         self.metrics.requests_enqueued += 1
-        self._queue.put_nowait(job)
 
         try:
             response = await asyncio.wait_for(

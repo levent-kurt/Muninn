@@ -67,6 +67,12 @@ def make_test_settings(**overrides) -> Settings:
         # switched off so the suite performs no DNS lookups and no HTTP probes.
         "scrape_allow_private_targets": True,
         "scrape_respect_robots": False,
+        # Rate limiters are off by default in tests: several tests legitimately
+        # issue bursts, and a 429 would fail them for the wrong reason. The
+        # limiter itself has dedicated tests.
+        "scrape_rate_limit_per_minute": 100_000,
+        "search_rate_limit_per_minute": 100_000,
+        "max_search_queue": 1_000,
     }
     base.update(overrides)
     return Settings(**base)

@@ -276,10 +276,11 @@ class BrowserPoolManager:
                         f"worker returned HTTP {resp.status_code}: {resp.text[:200]}"
                     )
                 data = resp.json()
+                status = data.get("status")
                 return RenderOutcome(
                     html=data.get("html") or "",
                     final_url=data.get("final_url") or url,
-                    status=data.get("status") or 200,
+                    status=200 if status is None else int(status),
                     elapsed_ms=data.get("elapsed_ms") or 0,
                     error=data.get("error"),
                 )
@@ -304,10 +305,11 @@ class BrowserPoolManager:
                     f"worker retry returned HTTP {resp.status_code}: {resp.text[:200]}"
                 )
             data = resp.json()
+            status = data.get("status")
             return RenderOutcome(
                 html=data.get("html") or "",
                 final_url=data.get("final_url") or url,
-                status=data.get("status") or 200,
+                status=200 if status is None else int(status),
                 elapsed_ms=data.get("elapsed_ms") or 0,
                 error=data.get("error"),
             )

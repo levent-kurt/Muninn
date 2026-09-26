@@ -52,6 +52,14 @@ class Settings:
     default_max_results: int = field(default_factory=lambda: _env_int("DEFAULT_MAX_RESULTS", 10))
     max_max_results: int = field(default_factory=lambda: _env_int("MAX_MAX_RESULTS", 50))
     request_timeout_seconds: int = field(default_factory=lambda: _env_int("REQUEST_TIMEOUT_SECONDS", 120))
+    # The search queue is bounded: throughput is ~2-4 requests/minute because of
+    # the throttle, so a deeper queue only accumulates work that will time out.
+    # Requests arriving when it is full get 503 with Retry-After.
+    max_search_queue: int = field(default_factory=lambda: _env_int("MAX_SEARCH_QUEUE", 100))
+    # Per-client budget for /search (abuse protection, not authentication).
+    search_rate_limit_per_minute: int = field(
+        default_factory=lambda: _env_int("SEARCH_RATE_LIMIT_PER_MINUTE", 30)
+    )
 
     # --- Browser driver -----------------------------------------------------
     headless: bool = field(default_factory=lambda: _env_bool("HEADLESS", True))
@@ -106,6 +114,9 @@ class Settings:
     # Fast-path (plain HTTP) fetch.
     scrape_fast_path_timeout: float = field(default_factory=lambda: _env_float("SCRAPE_FAST_PATH_TIMEOUT", 20.0))
     scrape_max_body_bytes: int = field(default_factory=lambda: _env_int("SCRAPE_MAX_BODY_BYTES", 10_000_000))
+    # Redirects are followed manually so every hop is re-validated by the SSRF
+    # guard. Keep this small: each hop is a real request and a real DNS lookup.
+    scrape_max_redirects: int = field(default_factory=lambda: _env_int("SCRAPE_MAX_REDIRECTS", 5))
 
     # Per-host politeness: minimum gap between consecutive requests to one
     # hostname (applies across the fast-path AND browser-render legs).

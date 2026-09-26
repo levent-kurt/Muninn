@@ -66,6 +66,11 @@ class FakeFetcher:
         self.responses = responses
         self.error = error
         self.calls: list[str] = []
+        self.validator = None
+
+    def set_validator(self, validate) -> None:
+        """The real fetcher takes the SSRF policy from the service."""
+        self.validator = validate
 
     async def fetch(self, url: str) -> FastPathResult:
         self.calls.append(url)

@@ -166,7 +166,11 @@ class BrowserController:
             viewport={"width": 1280, "height": 900},
         )
         page = await context.new_page()
-        status: int = 200
+        # 0 means "no HTTP response was ever observed". It is deliberately not
+        # 200: a navigation that timed out did not succeed, and reporting 200
+        # asserted a success the browser never saw. The service falls back to the
+        # fast-path status when the render yields 0.
+        status: int = 0
         try:
             try:
                 response = await page.goto(
