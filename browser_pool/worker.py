@@ -204,22 +204,15 @@ class BrowserController:
                 await self._shutdown_browser()
 
     async def _shutdown_browser(self) -> None:
-        # In subprocess mode we snapshot our whole process tree (node driver +
-        # every Chromium process, incl. renderers) BEFORE teardown: Chromium
-        # detaches its browser into its own process group and graceful close
-        # can orphan stray renderers, so neither killpg nor a post-close pid
-        # walk can reach them. The snapshot records pid, process group and the
-        # browser's --user-data-dir, so the reaper can also kill processes born
-        # DURING/AFTER teardown (they inherit the browser's group/profile) that
-        # would otherwise outlive the worker.
-        tree, profiles = (
-            _tree_snapshot(os.getpid())
-            if (
-                self._settings.scrape_worker_mode == "subprocess"
-                and os.getpgid(os.getpid()) == os.getpid()  # we are our group leader
-            )
-            else ([], set())
-        )
+        # Snapshot our whole process tree (node driver + every Chromium process,
+        # incl. renderers) BEFORE teardown. Chromium detaches its browser into
+        # its own process group, and a graceful close can leave stray renderers
+        # behind that neither a group signal nor a post-close walk can reach.
+        # The snapshot records pid, process group and the browser's
+        # --user-data-dir, so the reaper can also catch anything born DURING or
+        # AFTER teardown.
+        tree, profiles = _tree_snapshot(os.getpid())
+
         async with self._lock:
             if self._browser is not None:
                 try:
@@ -236,43 +229,52 @@ class BrowserController:
             self._stealth_cm = None
             logger.info("stealth Chromium shut down")
 
-        # Deterministic idle exit for subprocess mode. uvicorn's SIGTERM handler
-        # is NOT reliably installed when this worker is spawned by the API via
-        # asyncio.create_subprocess_exec (observed: the worker dies with the
-        # default disposition, returncode -15), so self-signals can kill us
-        # mid-teardown and orphan the playwright node driver / Chromium.
-        # Instead: best-effort graceful close (above), then:
-        #   1. SIGTERM the whole process group (the worker is its group leader
-        #      thanks to main(): setpgid(0, 0)) so the node driver closes
-        #      cleanly;
-        #   2. fork a detached "reaper" that leaves the group (setsid) and ~1s
-        #      later SIGKILLs: every pid captured in the snapshot, every process
-        #      group captured in the snapshot (catches anything spawned into the
-        #      browser's group during teardown), and every process still using
-        #      the browser's --user-data-dir (catches anything born late, even
-        #      in its own new group);
-        #   3. exit cleanly with code 0 (the manager treats that as "lazy").
-        # The reaper is a fresh process that never touches the event loop, so
-        # forking from the single-threaded loop here is safe.
-        if (
-            self._settings.scrape_worker_mode == "subprocess"
-            and os.getpgid(os.getpid()) == os.getpid()
-        ):
+        if not tree and not profiles:
+            # Nothing was running, so there is nothing to sweep.
+            return
+
+        # Deterministic teardown, in BOTH deployment modes. An earlier version
+        # gated this on subprocess mode, which meant an externally supervised
+        # worker (systemd, launchd - the normal way to run it in production)
+        # logged "shut down" while Chromium processes survived and accumulated:
+        # each idle cycle left a few more orphans behind.
+        #
+        # The reaper child only calls setsid/sleep/os.kill/os._exit - no logging,
+        # no locks, no allocation - so it cannot deadlock on state inherited from
+        # another thread. It is NOT safe because the loop is single-threaded: the
+        # worker can be multi-threaded (and is, when it is the main process of a
+        # service manager), and CPython warns about fork() in that case. The
+        # child deliberately touches nothing that could hold a lock at fork time.
+        subprocess_mode = self._settings.scrape_worker_mode == "subprocess"
+        # Identities captured BEFORE the fork: after the child calls setsid() it
+        # no longer shares the worker's group, so the reaper cannot recognise the
+        # worker's group by inspecting itself.
+        worker_pid, worker_pgid = os.getpid(), os.getpgid(0)
+        # Only signal our process group if we lead it; otherwise it belongs to
+        # whatever started us and SIGTERMing it could take down a supervisor.
+        if worker_pgid == worker_pid:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)  # survive the group signal
             with suppress(ProcessLookupError, PermissionError):
-                os.killpg(os.getpid(), signal.SIGTERM)
-            try:
-                reaper = os.fork()
-            except OSError:  # pragma: no cover - fork unavailable
-                reaper = -1
-            if reaper == 0:  # child: detached reaper
-                with suppress(OSError):  # leave the worker's group so our killpg is safe
-                    os.setsid()
-                time.sleep(REAPER_GRACE_SECONDS)
-                _reap(tree, profiles)
-                os._exit(0)
+                os.killpg(worker_pgid, signal.SIGTERM)
+        try:
+            reaper = os.fork()
+        except OSError:  # pragma: no cover - fork unavailable
+            reaper = -1
+        if reaper == 0:  # child: detached reaper, never returns to the loop
+            with suppress(OSError):  # leave the worker's group so our killpg is safe
+                os.setsid()
+            time.sleep(REAPER_GRACE_SECONDS)
+            _reap(tree, profiles, protect=(worker_pid, worker_pgid))
+            os._exit(0)
+
+        if subprocess_mode:
+            # The manager spawned us and expects a clean exit code here.
             logger.info("subprocess worker idle -> exiting (code 0)")
             os._exit(0)
+
+        # External mode: the process stays up to serve /ping, so reap the
+        # short-lived reaper child instead of leaving a zombie behind.
+        asyncio.create_task(_wait_for_child(reaper), name="reaper-reap")
 
 
 async def _settle(page: Page, quiet_ms: int = 800) -> None:
@@ -303,26 +305,38 @@ def _truncate_html(html: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _reap(tree: list[tuple[int, int]], profiles: set[str]) -> None:
+def _reap(
+    tree: list[tuple[int, int]],
+    profiles: set[str],
+    protect: tuple[int, int] = (0, 0),
+) -> None:
     """SIGKILL everything the pre-teardown snapshot captured.
 
     Runs inside the detached reaper child and never returns to the event loop.
     Three passes, so nothing escapes:
 
-    1. every pid in the snapshot, in case its process group is already gone;
-    2. every process group in the snapshot, which catches anything Chromium
-       spawned *into the browser's group* while we were tearing down;
+    1. every pid in the snapshot, in case its process group is already gone.
+       This is the pass that matters: it needs no process-group cooperation, so
+       it works even when the worker does not lead its own group.
+    2. every process group in the snapshot, catching anything Chromium spawned
+       *into the browser's group* while we were tearing down. The group named in
+       ``protect`` is skipped, because killing it would take the worker down
+       with the browser. ``protect`` must be the *worker's* pid and group, not
+       the reaper's own: the child calls ``setsid()`` and therefore no longer
+       shares the worker's group, so it cannot recognise it by looking at
+       itself.
     3. every process still using the browser's ``--user-data-dir``, which
        catches anything born late enough to have its own new group.
 
     Extracted out of the fork so it can be tested directly.
     """
+    keep_pid, keep_pgid = protect
     for pid, _pgid in tree:
-        if pid > 0:
+        if pid > 0 and pid != keep_pid:
             with suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
     for _pid, pgid in tree:
-        if pgid > 0:
+        if pgid > 0 and pgid != keep_pgid:
             with suppress(ProcessLookupError, PermissionError):
                 os.killpg(pgid, signal.SIGKILL)
     for profile in profiles:
@@ -346,9 +360,24 @@ def _reap(tree: list[tuple[int, int]], profiles: set[str]) -> None:
                 pid = int(token)
             except ValueError:
                 continue
-            if pid > 0:
+            if pid > 0 and pid != keep_pid:
                 with suppress(ProcessLookupError):
                     os.kill(pid, signal.SIGKILL)
+
+
+async def _wait_for_child(pid: int) -> None:
+    """Reap an already-exited child without blocking the event loop.
+
+    Only needed when the worker stays alive (external mode). The waitpid runs in
+    a thread, and a ChildProcessError just means something else already reaped
+    it - asyncio's own child watcher, for instance.
+    """
+
+    def _wait() -> None:
+        with suppress(ChildProcessError, OSError):
+            os.waitpid(pid, 0)
+
+    await asyncio.to_thread(_wait)
 
 
 def _tree_snapshot(root: int) -> tuple[list[tuple[int, int]], set[str]]:

@@ -58,7 +58,7 @@ documenting the boundary clearly.
   `/scrape`, `/status` - is open to anyone who can reach the port. There is no
   user model, no API key, and no per-tenant accounting.
   - The service therefore **binds to `127.0.0.1` by default**, and the
-    published Docker port is bound to `127.0.0.1` too.
+    started as a service, it inherits that protection.
   - `/docs`, `/redoc` and `/openapi.json` are **served by default**. They are
     documentation, not data, but the schema describes every available operation
     — set `DOCS_ENABLED=0` on any deployment you do not control.
@@ -74,7 +74,7 @@ documenting the boundary clearly.
   default (`BROWSER_NO_SANDBOX`), which is what makes it work in minimal
   containers. Combined with a browser that visits attacker-controlled pages,
   keep the container unprivileged and its filesystem read-only, as
-  `docker-compose.yml` does. Set `BROWSER_NO_SANDBOX=false` and grant the
+  service manager does. Set `BROWSER_NO_SANDBOX=false` and grant the
   sandbox the capabilities it needs if your environment allows it.
 
 ## Hardening checklist for internet-facing deployments

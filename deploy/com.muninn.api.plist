@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Muninn API gateway - macOS launchd job.
+
+  Install (replace the two paths marked TODO):
+    1. create the service account once:
+         sudo useradd -m -s /bin/bash muninn      # or use an existing account
+    2. clone and set up as that user:
+         sudo -u muninn git clone https://github.com/levent-kurt/Muninn.git ~/muninn
+         sudo -u muninn python3 -m venv ~/muninn/.venv
+         sudo -u muninn ~/muninn/.venv/bin/pip install -r ~/muninn/requirements.txt
+         sudo -u muninn ~/muninn/.venv/bin/python -m playwright install chromium
+    3. edit the two TODO paths below, then:
+         cp deploy/com.muninn.api.plist ~/Library/LaunchAgents/
+         launchctl load  ~/Library/LaunchAgents/com.muninn.api.plist
+         # or: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.muninn.api.plist
+
+  Logs:  tail -f ~/muninn/data/stdout.log ~/muninn/data/stderr.log
+  Stop:  launchctl unload ~/Library/LaunchAgents/com.muninn.api.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.muninn.api</string>
+
+    <!-- TODO: point these at the real checkout and the account you used. -->
+    <key>UserName</key>
+    <string>muninn</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/muninn/muninn</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/muninn/muninn/.venv/bin/uvicorn</string>
+        <string>app.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>9999</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HEADLESS</key>
+        <string>true</string>
+        <key>HOST</key>
+        <string>0.0.0.0</string>
+        <key>PORT</key>
+        <string>9999</string>
+        <key>PER_HOST_DELAY_SECONDS</key>
+        <string>2</string>
+        <key>SCRAPE_WORKER_MODE</key>
+        <string>subprocess</string>
+        <key>CACHE_DB_PATH</key>
+        <string>/Users/muninn/muninn/data/cache.db</string>
+        <key>SCRAPE_WORKER_LOG_FILE</key>
+        <string>/Users/muninn/muninn/data/scrape-worker.log</string>
+        <!-- Chromium cannot use its sandbox under launchd; it runs as `muninn`,
+             never as root. Set to false only if your host allows the sandbox. -->
+        <key>BROWSER_NO_SANDBOX</key>
+        <string>true</string>
+        <!-- Set to false to keep /docs, /redoc and /openapi.json private. -->
+        <key>DOCS_ENABLED</key>
+        <string>true</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/muninn/muninn/data/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/muninn/muninn/data/stderr.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>

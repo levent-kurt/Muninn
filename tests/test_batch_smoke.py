@@ -1,8 +1,8 @@
 """Whole-pipeline load smoke test: 100+ searches through the real app.
 
 This used to be ``scripts/batch_smoke.py``, but it imported its fakes from
-``tests.conftest`` - so a script depended on the test package, and the Docker
-image (which excludes ``tests/``) could not run it at all. It is a test, so it
+``tests.conftest`` - so a script depended on the test package, and a packaged
+deployment (which excludes ``tests/``) could not run it at all. It is a test, so it
 lives here now, and CI runs it on every push.
 
 Covers, with a simulated driver and no network:

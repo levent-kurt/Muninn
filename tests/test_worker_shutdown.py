@@ -303,3 +303,52 @@ def test_killpg_reaches_only_its_own_group() -> None:
         assert outside.poll() is None, "killpg reached outside its group"
     finally:
         _cleanup([inside, outside])
+
+
+def test_reap_never_signals_the_protected_process_group() -> None:
+    """The killpg pass must skip the group it was told to protect.
+
+    Regression: the reaper used to compare against its *own* pgid, but it calls
+    setsid() before working, so it no longer shares the worker's group and the
+    comparison never matched - the reaper then SIGKILLed the worker itself.
+    The worker's pid and group are therefore passed in explicitly.
+    """
+    own_pid, own_pgid = os.getpid(), os.getpgid(os.getpid())
+    # A pid that cannot exist, in the group we must not touch: only the group
+    # pass could do harm here.
+    _reap([(2**22 - 1, own_pgid)], set(), protect=(own_pid, own_pgid))
+    time.sleep(0.2)
+    assert os.getpid() > 0, "the reaper signalled the process group it was told to protect"
+
+
+def test_reap_still_kills_a_group_it_was_not_told_to_protect() -> None:
+    """The guard must exempt one group, not disable the group pass."""
+    procs = _sleep_tree(depth=1)
+    try:
+        group = os.getpgid(procs[0].pid)
+        _reap([(2**22 - 1, group)], set(), protect=(os.getpid(), os.getpgid(0)))
+        # wait() reaps: a killed child stays in the table as a zombie until its
+        # parent collects it, and os.kill(pid, 0) still succeeds on a zombie.
+        procs[0].wait(timeout=5)
+        assert procs[0].returncode is not None, "an unprotected group was not swept"
+    finally:
+        _cleanup(procs)
+
+
+def test_reap_kills_processes_that_share_the_protected_group_by_pid() -> None:
+    """A descendant in the worker's own group still dies - by pid, not by group.
+
+    Group-killing the worker's group is unsafe, so the pid pass is what
+    guarantees cleanup for anything that shares it.
+    """
+    # No start_new_session: this child inherits our process group.
+    sibling = subprocess.Popen([sys.executable, "-c", SLEEPER])
+    time.sleep(0.3)
+    try:
+        own_pgid = os.getpgid(os.getpid())
+        assert os.getpgid(sibling.pid) == own_pgid
+        _reap([(sibling.pid, own_pgid)], set(), protect=(os.getpid(), own_pgid))
+        sibling.wait(timeout=5)
+        assert sibling.poll() is not None, "a listed process in the protected group survived"
+    finally:
+        _cleanup([sibling])

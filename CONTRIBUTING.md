@@ -61,6 +61,7 @@ House rules the tooling cannot check for you:
   Match that.
 - **No new runtime dependencies without discussion.** They change the install
   story for everyone.
+  story for everyone.
 
 ## Commit and PR conventions
 

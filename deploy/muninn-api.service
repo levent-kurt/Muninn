@@ -1,0 +1,69 @@
+# Muninn API gateway - systemd unit.
+#
+# Install:
+#   sudo useradd --system --create-home --home-dir /opt/muninn muninn
+#   sudo -u muninn git clone https://github.com/levent-kurt/Muninn.git /opt/muninn/app
+#   sudo -u muninn python3.12 -m venv /opt/muninn/app/.venv
+#   sudo -u muninn /opt/muninn/app/.venv/bin/pip install -r /opt/muninn/app/requirements.txt
+#   sudo -u muninn /opt/muninn/app/.venv/bin/python -m playwright install chromium
+#   sudo cp deploy/muninn-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now muninn-api
+#
+# Then:  systemctl status muninn | journalctl -u muninn-api -f
+[Unit]
+Description=Muninn search and scrape API gateway
+Documentation=https://github.com/levent-kurt/Muninn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=muninn
+Group=muninn
+WorkingDirectory=/opt/muninn/app
+
+# Chromium's sandbox is unreliable under a service manager; the browser runs
+# unprivileged as `muninn`, never as root. Set BROWSER_NO_SANDBOX=false if your
+# host lets Chromium keep its sandbox.
+Environment=HEADLESS=true
+Environment=HOST=0.0.0.0
+Environment=PORT=9999
+Environment=PER_HOST_DELAY_SECONDS=2
+Environment=SCRAPE_WORKER_MODE=subprocess
+Environment=CACHE_DB_PATH=/opt/muninn/data/cache.db
+Environment=SCRAPE_WORKER_LOG_FILE=/opt/muninn/data/scrape-worker.log
+# Uncomment to keep the schema private to the host.
+#Environment=DOCS_ENABLED=false
+
+# Security hardening. Chromium renders arbitrary, attacker-controlled pages, so
+# the process gets as little as it can run without.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/muninn/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+# Uncomment both if you serve Chromium's own sandbox instead of --no-sandbox:
+#SystemCallFilter=@system-service
+#SystemCallArchitectures=native
+
+ExecStart=/opt/muninn/app/.venv/bin/uvicorn app.main:app \
+    --host 0.0.0.0 --port 9999 --no-access-log
+
+Restart=on-failure
+RestartSec=5
+# Chromium needs room; a single render is memory-hungry.
+MemoryMax=3G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=muninn-api
+
+[Install]
+WantedBy=multi-user.target

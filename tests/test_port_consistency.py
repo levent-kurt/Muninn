@@ -1,10 +1,10 @@
 """The listening port must agree everywhere it is written down.
 
-The port appears in four independent places - ``Settings.port``, the ``Makefile``,
-the ``Dockerfile`` and ``docker-compose.yml`` - and nothing in the code connects
-them. That is not theoretical: a bare ``uvicorn app.main:app`` silently used
-uvicorn's own default (8000) while ``Settings.port`` said otherwise, so the
-configured port was dead config nobody noticed.
+The port appears in several independent places - ``Settings.port``, the
+``Makefile`` and the documented ``uvicorn`` command - and nothing in the code
+connects them. That is not theoretical: a bare ``uvicorn app.main:app``
+silently used uvicorn's own default of 8000 while ``Settings.port`` said
+otherwise, so the configured port was dead config nobody noticed.
 
 These tests are the guard. If the port moves, they fail until every place moves
 with it.
@@ -31,23 +31,10 @@ def test_makefile_uses_the_configured_port() -> None:
     assert int(match.group(1)) == Settings().port
 
 
-def test_dockerfile_exposes_and_serves_the_configured_port() -> None:
-    dockerfile = (ROOT / "Dockerfile").read_text()
-    assert f"EXPOSE {Settings().port} 8765" in dockerfile
-    assert f'"--port", "{Settings().port}"' in dockerfile
-    # The healthcheck must probe the port the app actually binds.
-    assert f"127.0.0.1:{Settings().port}/health/live" in dockerfile
-
-
-def test_compose_maps_the_configured_port() -> None:
-    compose = (ROOT / "docker-compose.yml").read_text()
-    assert f"${{PORT:-{Settings().port}}}:{Settings().port}" in compose
-    assert f"127.0.0.1:{Settings().port}/health/live" in compose
-
-
 def test_readme_documents_the_configured_port() -> None:
     readme = (ROOT / "README.md").read_text()
     assert f"| `PORT` | `{Settings().port}` |" in readme
+    assert f"127.0.0.1:{Settings().port}" in readme
     # No stale reference to the old default anywhere in the published docs.
     assert "8000" not in readme
 
@@ -58,3 +45,13 @@ def test_app_main_entry_point_uses_the_settings() -> None:
     assert "uvicorn.run(" in source
     assert "host=settings.host" in source
     assert "port=settings.port" in source
+
+
+def test_service_units_agree_with_the_configured_port() -> None:
+    """The shipped systemd/launchd examples must use the same port."""
+    for name in ("deploy/muninn-api.service", "deploy/com.muninn.api.plist"):
+        text = (ROOT / name).read_text()
+        # systemd writes "--port 9999", launchd a separate <string> element, so
+        # assert the invariant (right port, no stale default) rather than a format.
+        assert str(Settings().port) in text, f"{name} does not use port {Settings().port}"
+        assert "8000" not in text, f"{name} still references the old default port"

@@ -10,7 +10,7 @@ RUFF    = $(BIN)/ruff
 MYPY    = $(BIN)/mypy
 
 .DEFAULT_GOAL := help
-.PHONY: help venv install browsers check lint format typecheck test run docker-build docker-up docker-down clean
+.PHONY: help venv setup install browsers browser-deps check lint format typecheck test run serve clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -54,14 +54,6 @@ run: ## Run the API locally with autoreload
 serve: ## Run the API without autoreload, honouring HOST/PORT from app/config.py
 	$(BIN)/python -m app.main
 
-docker-build: ## Build the image
-	docker compose build
-
-docker-up: ## Start API + scrape worker
-	docker compose up -d
-
-docker-down: ## Stop and remove the stack
-	docker compose down
 
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov

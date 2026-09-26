@@ -2,7 +2,7 @@
 
 Every tunable (throttle delays, quarantine durations, cache TTL, browser
 settings) lives here and can be overridden with an environment variable so the
-behaviour is identical on a home PC, in CI tests, and inside Docker.
+behaviour is identical on a home PC, in CI, and under a service manager.
 """
 
 from __future__ import annotations
@@ -68,8 +68,8 @@ class Settings:
     # Chromium's sandbox is a real security boundary; it is off by default only
     # because it is unreliable inside minimal containers. Running Muninn as root
     # AND with the sandbox disabled means a browser escape is a host compromise,
-    # so keep BROWSER_NO_SANDBOX=false outside Docker and grant the container the
-    # capabilities Chromium's sandbox needs (see docker-compose.yml).
+    # so keep BROWSER_NO_SANDBOX=false where the sandbox works and grant the
+    # capabilities Chromium needs (see deploy/muninn-api.service).
     browser_no_sandbox: bool = field(
         default_factory=lambda: _env_bool("BROWSER_NO_SANDBOX", True)
     )
@@ -151,7 +151,7 @@ class Settings:
 
     # --- Service ------------------------------------------------------------
     # Bind address. Defaults to loopback so a bare `uvicorn app.main:app` is
-    # not reachable from the network; docker-compose overrides this to 0.0.0.0
+    # not reachable from the network; a service unit overrides this to 0.0.0.0
     # because containers must bind all interfaces.
     host: str = field(default_factory=lambda: os.environ.get("HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: _env_int("PORT", 9999))

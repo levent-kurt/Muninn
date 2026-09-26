@@ -1,6 +1,6 @@
 # Muninn — Self-Hosted Stealth Web Search & Data Extraction Gateway for AI Agents
 
-Muninn is a lightweight, dockerized **search and scraping API** for a home
+Muninn is a lightweight, self-hosted **search and scraping API** for a home
 server. It exposes a clean REST API for web searches while a single persistent,
 anti-bot-hardened Chromium scrapes **Google**, **Bing**, **DuckDuckGo** and
 **Mojeek** for you — rotating engines, throttling traffic, and auto-quarantining
@@ -50,7 +50,7 @@ per-host politeness and a bounded TTL cache.
 ## Contents
 
 1. [Install](#1-install)
-2. [Run](#2-run)
+2. [Run and deploy](#2-run-and-deploy)
 3. [API](#3-api)
 4. [Configuration](#4-configuration)
 5. [How it works](#5-how-it-works)
@@ -131,25 +131,6 @@ sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
 (`make browser-deps` installs these for you; they are listed here only for
 locked-down images where you manage packages yourself.)
 
-### Docker (any OS)
-
-```bash
-git clone https://github.com/levent-kurt/Muninn.git
-cd Muninn
-docker compose up -d --build
-```
-
-Everything Chromium needs is inside the image, so there is no host Python or
-browser setup. The stack builds natively for your machine's architecture
-(`linux/amd64` or `linux/arm64`); see
-[Troubleshooting](#troubleshooting) if you hit a platform mismatch.
-
-This starts two containers from one image: `muninn` (the API, published on
-`127.0.0.1:9999`) and `scrape-worker` (the browser pool, reachable only on the
-internal network).
-
----
-
 ## 2. Run
 
 ### Locally
@@ -167,21 +148,88 @@ curl http://127.0.0.1:9999/health/live
 open http://127.0.0.1:9999/docs      # Swagger UI
 ```
 
-### With Docker Compose
+### The command that actually matters
+
+Everything below is the same process started differently:
 
 ```bash
-docker compose up -d --build
-docker compose logs -f muninn
-docker compose ps
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 9999
 ```
 
-`GET /health` returns `{"status": "ok", ...}` when both the browser and the
-scrape pool are healthy. Cached queries survive restarts in `./data`.
+`--host 0.0.0.0` binds every interface. Muninn has **no authentication**, so
+on a host reachable from anywhere you do not control, that turns it into an open
+proxy backed by a stealth browser. Prefer one of:
 
-> The compose stack runs the containers as an **unprivileged user** with a
-> read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`.
+- bind a private address instead: `--host 127.0.0.1` or `--host 10.0.0.5`;
+- keep `0.0.0.0` but let a firewall drop external traffic to 9999;
+- put a reverse proxy with authentication in front (nginx, Caddy) and let it be
+  the only thing listening publicly.
 
----
+Set `DOCS_ENABLED=false` in the same situations, so `/docs` and
+`/openapi.json` are not published to whoever can reach the port.
+
+### Running as a service (production)
+
+Muninn is a single long-lived process: one uvicorn worker, one persistent
+search browser, and a scrape-worker subprocess it spawns on demand. It is
+restarted by the service manager, not by an init system of its own.
+
+**Linux (systemd).** A ready unit is in [`deploy/muninn-api.service`](deploy/muninn-api.service):
+
+```bash
+sudo useradd --system --create-home --home-dir /opt/muninn muninn
+sudo -u muninn git clone https://github.com/levent-kurt/Muninn.git /opt/muninn/app
+sudo -u muninn python3 -m venv /opt/muninn/app/.venv
+sudo -u muninn /opt/muninn/app/.venv/bin/pip install -r /opt/muninn/app/requirements.txt
+sudo -u muninn /opt/muninn/app/.venv/bin/python -m playwright install chromium
+sudo -u muninn mkdir -p /opt/muninn/data
+
+sudo cp deploy/muninn-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now muninn-api
+```
+
+The unit already runs as the unprivileged `muninn` account with
+`NoNewPrivileges`, `ProtectSystem=strict` and a read-only filesystem outside
+`/opt/muninn/data`.
+
+```bash
+systemctl status muninn-api
+journalctl -u muninn-api -f          # logs
+sudo systemctl restart muninn-api
+```
+
+**macOS (launchd).** A template is in
+[`deploy/com.muninn.api.plist`](deploy/com.muninn.api.plist). Edit its two
+`TODO` paths to your checkout and account, then:
+
+```bash
+cp deploy/com.muninn.api.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.muninn.api.plist
+# older macOS:
+launchctl load ~/Library/LaunchAgents/com.muninn.api.plist
+
+launchctl list | grep muninn
+tail -f data/stdout.log data/stderr.log
+```
+
+**Notes for a real deployment**
+
+- **Do not run it as root.** The service account exists so that a Chromium
+  escape is a compromised low-privilege account rather than a compromised host.
+  `--no-sandbox` is on by default because Chromium's sandbox is unreliable under
+  a service manager; if your host allows the sandbox, set
+  `BROWSER_NO_SANDBOX=false`.
+- **One worker process only.** Run a single uvicorn process. Multiple workers
+  would each start their own browser, and the throttle and the circuit breaker
+  only make sense per process.
+- **Persistent state lives in `data/`** — the SQLite cache and the worker log.
+  Back that directory up; nothing else needs to survive a restart except the
+  engine quarantine counters, which live in the same database.
+- **The throttle is the point.** The default 15–30s delay and 24h cache keep a
+  residential IP well below any engine's quota. Do not lower them to "go
+  faster".
+- **Put it behind TLS** if it leaves your machine. There is no auth in the app.
 
 ## 3. API
 
@@ -282,7 +330,7 @@ Everything is an environment variable; the full list with defaults lives in
 
 | Variable | Default | Description |
 |---|---|---|
-| `HOST` | `127.0.0.1` | Bind address (compose sets `0.0.0.0`) |
+| `HOST` | `127.0.0.1` | Bind address; pass `--host` to uvicorn to override |
 | `PORT` | `9999` | Bind port |
 | `DOCS_ENABLED` | `true` | Serve `/docs` (Swagger UI), `/redoc` and `/openapi.json` |
 | `CACHE_DB_PATH` | `data/cache.db` | SQLite path (`:memory:` disables disk) |
@@ -390,7 +438,7 @@ Muninn is **unauthenticated by design**: it is a single-user service, and
 building a half-working auth layer would be worse than being explicit about the
 boundary. The defaults are therefore safe rather than secure-but-surprising:
 
-- binds **`127.0.0.1`** (and compose publishes the port to `127.0.0.1`);
+- binds **`127.0.0.1`** unless you pass `--host 0.0.0.0`;
 - containers run as a **non-root user** with a read-only root filesystem,
   `cap_drop: ALL` and `no-new-privileges`.
 
@@ -487,8 +535,7 @@ routers/                  /scrape and /health FastAPI routers
 scripts/                  opt-in live probe against real engines
 tests/                    unit + API integration tests
 data/                     SQLite cache and worker log (gitignored)
-Dockerfile                Python + Chromium runtime image (non-root)
-docker-compose.yml        API + scrape-worker deployment
+deploy/                   systemd unit and launchd job for production
 Makefile                  install / lint / typecheck / test / run targets
 pyproject.toml            project metadata, ruff, mypy and pytest configuration
 ```
@@ -531,36 +578,37 @@ install these - `make browser-deps` does, and it needs `sudo`.
 make browser-deps
 ```
 
-### `docker compose up` fails with a platform mismatch
+### The service will not start: `No usable Chromium`
 
-```
-The requested image's platform (linux/arm64) does not match the detected host
-platform (linux/amd64/v3) and no specific platform was requested
-```
-
-A local image tagged `muninn:latest` was built on a **different machine**
-(typically an Apple-silicon laptop) and compose reused it instead of building
-from the current directory. Both services now set `pull_policy: build`, so this
-should not recur; on an older checkout:
+Chromium was never downloaded, or the OS libraries it needs are missing. Both
+steps are required on a fresh machine and are easy to forget on a server:
 
 ```bash
-docker compose down --rmi local     # drop the cached local image
-docker compose up -d --build
+.venv/bin/python -m playwright install chromium      # the browser
+.venv/bin/python -m playwright install-deps chromium  # system libraries (sudo)
 ```
 
-See what is in the cache:
+### `Permission denied` writing `data/cache.db`
+
+The service account cannot write its data directory. Give it ownership once:
 
 ```bash
-docker image inspect muninn:latest --format '{{.Os}}/{{.Architecture}}'
+sudo chown -R muninn:muninn /opt/muninn/data
 ```
 
-Muninn deliberately does **not** hardcode a `platform:`, so the stack builds
-natively on both amd64 and arm64. If you must cross-build, do it explicitly
-rather than committing the platform to the file:
+### The worker never appears, or `/scrape?render=1` returns 503
+
+The API spawns the scrape worker on demand and waits for it to answer `/ping`.
+Check the worker's own log - it is separate from the API's:
 
 ```bash
-docker buildx build --platform linux/amd64 -t muninn:latest .
+tail -f /opt/muninn/data/scrape-worker.log
 ```
+
+`SCRAPE_WORKER_MODE` decides who owns that process: `subprocess` (default) means
+the API spawns and supervises it; `external` means you run it as its own
+service and point `SCRAPE_WORKER_URL` at it. If you set `external` but never
+started it, renders will fail with 503.
 
 ### `apt-get install python3.12` says "Unable to locate package"
 
@@ -568,21 +616,16 @@ You are on Ubuntu 22.04, whose default repositories ship Python 3.10 - which
 Muninn supports. Use `python3` / `python3-venv`, or add the deadsnakes PPA if you
 specifically want 3.12.
 
-### The container is reported unhealthy
-
-`python:3.12-slim` ships no `curl`, so the healthcheck probes with the
-interpreter. If it has been replaced with a `curl` probe it can never pass.
-
-```bash
-docker inspect --format '{{.State.Health.Status}}' muninn
-docker compose logs muninn | tail -40
-```
-
 ### Port already in use
 
 ```bash
-PORT=10000 docker compose up -d      # or: PORT=10000 make serve
+PORT=10000 make serve
+# or, with uvicorn directly:
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 10000
 ```
+
+Find out what already has it: `ss -ltnp | grep 9999` (Linux) or
+`lsof -nP -iTCP:9999 -sTCP:LISTEN` (macOS).
 
 ---
 
