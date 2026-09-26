@@ -34,14 +34,19 @@ from drivers.browser_driver import BrowserDriver
 def rss_mb() -> float:
     """Peak resident memory in MiB, or 0.0 where the platform cannot report it.
 
-    ``resource`` is POSIX-only; importing it unconditionally would make this
-    script fail on Windows with an opaque ImportError.
+    ``resource`` is POSIX-only, so it is imported here rather than at module
+    scope (importing it unconditionally would make this script fail on Windows).
+    The unit of ``ru_maxrss`` differs: **bytes** on macOS, **kilobytes** on
+    Linux. Getting that wrong inflated the figure by 1024x, which is how a 47 MB
+    process was reported as 47 GB.
     """
     try:
         import resource
     except ImportError:
         return 0.0
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0  # *nix = KB
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    return raw / divisor
 
 
 async def run(query: str) -> int:
@@ -61,7 +66,7 @@ async def run(query: str) -> int:
     await cache.connect()
     await service.start()
     browser_before = driver._browser
-    context_before = driver._context
+    contexts_before = dict(driver._contexts)
     rss_start = rss_mb()
 
     # Friendlier engines first so useful output lands early even if Google stalls.
@@ -88,8 +93,10 @@ async def run(query: str) -> int:
                 outcomes[engine] = outcome
 
         rss_end = rss_mb()
-        context_reused = (
-            driver._browser is browser_before and driver._context is context_before
+        # The browser must be the same object, and each engine's context must
+        # have been reused rather than recreated (that is what keeps RSS flat).
+        context_reused = driver._browser is browser_before and all(
+            driver._contexts.get(name) is ctx for name, ctx in contexts_before.items()
         )
 
         print("=" * 56)
