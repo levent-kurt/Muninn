@@ -19,7 +19,6 @@ for a service with one user.
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Iterable
 
 # Latency buckets in seconds. Chosen around the real costs: a cache hit is
@@ -197,30 +196,3 @@ def _num(value: float) -> str:
     if isinstance(value, float) and not value.is_integer():
         return f"{value:.6g}"
     return str(int(value))
-
-
-class Timer:
-    """Context manager that records its own wall-clock duration.
-
-    ``with Timer(registry, "muninn_scrape_leg_seconds", {"leg": "fast_path"}):``
-    """
-
-    __slots__ = ("_registry", "_name", "_labels", "_start")
-
-    def __init__(
-        self,
-        registry: Registry,
-        name: str,
-        labels: dict[str, str] | None = None,
-    ) -> None:
-        self._registry = registry
-        self._name = name
-        self._labels = labels or {}
-        self._start = 0.0
-
-    def __enter__(self) -> Timer:
-        self._start = time.perf_counter()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._registry.observe(self._name, time.perf_counter() - self._start, self._labels)

@@ -183,3 +183,38 @@ def test_number_formatting_is_valid_prometheus(value: float) -> None:
     reg.set_gauge("g", value)
     line = next(x for x in reg.render_text().splitlines() if x.startswith("g "))
     float(line.split()[1])  # must parse
+
+
+# --------------------------------------------------------------------------- gauges
+
+
+def test_gauges_are_emitted_after_a_refresh() -> None:
+    """Regression: five gauges were describe()d but never set, so they produced
+    no output at all - declared metrics that silently did not exist."""
+    import re as _re
+
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import FakeDriver, make_test_settings
+
+    app = create_app(settings=make_test_settings(), driver_factory=lambda s: FakeDriver())
+    with TestClient(app) as client:
+        # A search first, so there is at least one counter and histogram too.
+        client.get("/search", params={"q": "metrics smoke"})
+        text = client.get("/metrics").text
+
+    for name in (
+        "muninn_cache_entries",
+        "muninn_scrape_cache_entries",
+        "muninn_search_queue_depth",
+        "muninn_browser_pool_up",
+        "muninn_browser_pool_jobs",
+    ):
+        assert _re.search(rf"^{name}(\{{[^}}]*\}})? \S+", text, _re.M), (
+            f"{name} is declared but never emitted"
+        )
+
+    # A gauge is a plain value, not a bucket series.
+    assert "# TYPE muninn_search_queue_depth gauge" in text
+    assert "muninn_search_queue_depth_bucket" not in text

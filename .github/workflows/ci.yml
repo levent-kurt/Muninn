@@ -54,7 +54,7 @@ jobs:
       fail-fast: false
       matrix:
         # The minimum supported version and the current default.
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 

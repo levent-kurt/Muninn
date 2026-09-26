@@ -554,12 +554,18 @@ What is exported, and why those numbers:
 | `muninn_search_engine_seconds{engine}` | histogram | per-engine latency, so a slow engine is visible before it gets quarantined |
 | `muninn_scrape_leg_seconds{leg}` | histogram | `fast_path` vs `render` — shows what browser escalations cost |
 | `muninn_scrape_total{outcome}` | counter | `ok`, `sitemap`, `blocked`, `error` |
+| `muninn_cache_entries`, `muninn_scrape_cache_entries` | gauge | live entries in each cache |
+| `muninn_search_queue_depth` | gauge | how deep the search backlog is |
+| `muninn_browser_pool_up`, `muninn_browser_pool_jobs` | gauge | worker reachable, and how many renders it has run |
 | `muninn_search_queue_rejections_total` | counter | requests refused because the queue was full |
 | `muninn_*_rate_limited_total` | counter | requests refused by a rate limiter |
 
 Latency buckets are fixed at 5 ms … 60 s, chosen around the real costs (a cache
 hit is ~0 s, a fast-path fetch 0.1–2 s, a browser render 1–45 s, a queued search
 up to `REQUEST_TIMEOUT_SECONDS`).
+
+Gauges are computed at scrape time, not pushed from a background task, so what
+Prometheus last scraped is by definition current.
 
 Label cardinality is bounded on purpose: only known routes get their own series
 and everything else is folded into `other`, so an anonymous caller cannot create

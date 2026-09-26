@@ -86,8 +86,9 @@ under systemd or launchd.
 
 ### Notes
 
-- The requirements are fully pinned and the suite is hermetic: 231 tests, no
-  network and no browser, in about 8 seconds.
+- The requirements are fully pinned and the suite is hermetic: 233 tests, no
+  network and no browser, in about 8 seconds. Verified locally on Python 3.10 and
+  3.12; CI also covers 3.13.
 - Platform support is Linux and macOS (the browser teardown uses POSIX process
   groups, `setsid` and `pgrep`/`ps`).
 - There is no container image; see the README for service-based deployment.
