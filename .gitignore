@@ -20,10 +20,14 @@ data/scrape-worker.log
 # --- Local-only working documents ------------------------------------------
 # Internal planning/audit docs and agent scratch files: kept on this machine,
 # never published to the repository.
+#
+# Note the `*` on the AGENTS patterns: a bare `AGENTS.md` does NOT match
+# `AGENTS.md.local`, and `git add -A` will happily commit the copy.
 TODO*.md
 SPEC.md
-REPORT.md
-REPORT2.md
+REPORT*.md
+AGENTS.md
+AGENTS.md.*
 opencode.txt
 
 # --- Editors / OS ---------------------------------------------------------
