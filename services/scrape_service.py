@@ -16,10 +16,12 @@ Pipeline for one ``GET /scrape`` request::
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from app.config import Settings
 from fetchers.fast_path import FastPathResult
+from ops.metrics import Registry
 from ops.netguard import validate_target_url
 from ops.robots import RobotsGate
 from parsers import block_detector
@@ -47,7 +49,9 @@ class ScrapeService:
         browser_pool: BrowserPoolManager,
         robots: RobotsGate | None = None,
         validator: Callable[[str], Awaitable[str]] | None = None,
+        registry: Registry | None = None,
     ) -> None:
+        self._registry = registry
         self._settings = settings
         self._fetcher = fetcher
         self._politeness = politeness
@@ -70,6 +74,17 @@ class ScrapeService:
         # redirect target must clear the same SSRF guard as the caller's URL.
         # Without this the guard would only ever see the first hop.
         self._fetcher.set_validator(self._validate_target)
+
+    def _observe(self, leg: str, seconds: float) -> None:
+        """Record one scrape leg's duration, if a registry was supplied."""
+        if self._registry is not None:
+            self._registry.observe(
+                "muninn_scrape_leg_seconds", seconds, {"leg": leg}
+            )
+
+    def _count(self, outcome: str) -> None:
+        if self._registry is not None:
+            self._registry.increment("muninn_scrape_total", {"outcome": outcome})
 
     async def _default_validator(self, url: str) -> str:
         return await validate_target_url(
@@ -113,11 +128,16 @@ class ScrapeService:
             await self._robots.check(url)
 
         async with self._politeness.slot(url):
-            fast = await self._fetcher.fetch(url)
+            started = perf_counter()
+            try:
+                fast = await self._fetcher.fetch(url)
+            finally:
+                self._observe("fast_path", perf_counter() - started)
 
             # Sitemap document: return <loc> links instantly, bypassing the
             # rendering and body-text extraction passes.
             if looks_like_sitemap(url, fast.content_type):
+                self._count("sitemap")
                 response = self._build(
                     url,
                     fast,
@@ -151,6 +171,7 @@ class ScrapeService:
             if thin.blocked:
                 return await self._escalate(url, fast, max_text, max_links, render_flag)
 
+            self._count("ok")
             response = self._build(
                 url,
                 fast,
@@ -175,7 +196,14 @@ class ScrapeService:
         render_flag: int,
     ) -> ScrapeResponse:
         """Render the page in the stealth browser pool and re-evaluate it."""
-        outcome: RenderOutcome = await self._pool.render(url)
+        started = perf_counter()
+        try:
+            outcome: RenderOutcome = await self._pool.render(url)
+        except Exception:
+            self._count("error")
+            raise
+        finally:
+            self._observe("render", perf_counter() - started)
         html = outcome.html or ""
         final_url = outcome.final_url or fast.final_url
         status = outcome.status or fast.status
@@ -192,6 +220,7 @@ class ScrapeService:
                 self._settings.text_min_char_threshold,
             ).blocked
 
+        self._count("ok" if not block_suspected else "blocked")
         response = self._build(
             url,
             fast,

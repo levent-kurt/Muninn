@@ -21,6 +21,7 @@ import random
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from time import perf_counter
 
 from app.cache import SearchCache
 from app.config import Settings
@@ -28,6 +29,7 @@ from app.engine_manager import AllEnginesQuarantinedError, EngineManager
 from app.models import SearchResponse
 from drivers.browser_driver import BrowserDriver
 from drivers.parsers import EngineBlockedError, get_parser
+from ops.metrics import Registry
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ class SearchJob:
     requested_engine: str | None
     force_refresh: bool
     future: asyncio.Future = field(default_factory=asyncio.Future)
+    enqueued_at: float | None = None
 
 
 @dataclass
@@ -51,6 +54,7 @@ class Metrics:
     circuit_breaker_trips: int = 0
     requests_enqueued: int = 0
     queue_rejections: int = 0
+    cache_write_skips: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -60,6 +64,7 @@ class Metrics:
             "circuit_breaker_trips": self.circuit_breaker_trips,
             "requests_enqueued": self.requests_enqueued,
             "queue_rejections": self.queue_rejections,
+            "cache_write_skips": self.cache_write_skips,
         }
 
 
@@ -81,11 +86,13 @@ class SearchService:
         driver: BrowserDriver,
         cache: SearchCache,
         engines: EngineManager,
+        registry: Registry | None = None,
     ) -> None:
         self._settings = settings
         self._driver = driver
         self._cache = cache
         self._engines = engines
+        self._registry = registry
 
         # Bounded: see SearchQueueFullError.
         self._queue: asyncio.Queue[SearchJob] = asyncio.Queue(
@@ -152,11 +159,14 @@ class SearchService:
             max_results=max_results,
             requested_engine=requested_engine,
             force_refresh=force_refresh,
+            enqueued_at=perf_counter(),
         )
         try:
             self._queue.put_nowait(job)
         except asyncio.QueueFull as exc:
             self.metrics.queue_rejections += 1
+            if self._registry is not None:
+                self._registry.increment("muninn_search_queue_rejections_total")
             raise SearchQueueFullError(
                 f"search queue is full ({self._queue.maxsize} requests); retry shortly"
             ) from exc
@@ -213,7 +223,14 @@ class SearchService:
             parser = get_parser(engine)
             url = parser.search_url(job.query, job.max_results)
             try:
+                started = perf_counter()
                 html, status = await self._driver.fetch_html(url, engine)
+                if self._registry is not None:
+                    self._registry.observe(
+                        "muninn_search_engine_seconds",
+                        perf_counter() - started,
+                        {"engine": engine},
+                    )
                 if html is None:
                     # Navigation failed with nothing to parse - treat it exactly
                     # like a block so the engine is quarantined and we rotate.
@@ -224,9 +241,15 @@ class SearchService:
 
                 results = parser.parse(html, job.max_results)
                 await self._engines.report_success(engine)
-                # Cache regardless of force_refresh so future identical queries
-                # (and the client's own retries) are served without hitting engines.
-                await self._cache.set(job.query, results, engine)
+                if job.force_refresh:
+                    # force_refresh means "do not touch the cache": read through
+                    # the engines and do not store the result either. Storing it
+                    # would make the flag name a lie and would let a
+                    # refresh-seeded entry outlive the caller's intent.
+                    self.metrics.cache_write_skips += 1
+                    logger.info("query=%r force_refresh: result not cached", job.query)
+                else:
+                    await self._cache.set(job.query, results, engine)
 
                 logger.info(
                     "query=%r engine=%s results=%d served",

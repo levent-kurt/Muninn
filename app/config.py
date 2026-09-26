@@ -171,6 +171,9 @@ class Settings:
     # fastest way to understand the API. The service has no authentication, so
     # set DOCS_ENABLED=0 anywhere other than a trusted machine.
     docs_enabled: bool = field(default_factory=lambda: _env_bool("DOCS_ENABLED", True))
+    # Log format: "text" for a terminal, "json" for one object per line.
+    log_format: str = field(default_factory=lambda: os.environ.get("LOG_FORMAT", "text"))
+    log_level: str = field(default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO"))
 
 
     def browser_launch_args(self) -> list[str]:

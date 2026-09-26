@@ -30,17 +30,16 @@ from browser_pool.manager import BrowserPoolManager
 from drivers.browser_driver import BrowserDriver, BrowserDriverError
 from fetchers.fast_path import FastPathFetcher
 from ops.cache import ScrapeCache
+from ops.logging import configure_logging
+from ops.metrics import Registry
 from ops.politeness import HostPoliteness
 from ops.ratelimit import RateLimiter, RateLimitExceeded
 from routers.health import router as health_router
+from routers.metrics import router as metrics_router
 from routers.scrape import router as scrape_router
 from schemas.common import ErrorResponse
 from services.scrape_service import ScrapeService
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
 logger = logging.getLogger("muninn")
 
 
@@ -57,6 +56,23 @@ def create_app(
     ``scrape_pool_factory`` (fake browser pool) to stay offline and fast.
     """
     settings = settings or get_settings()
+    configure_logging(settings.log_format, settings.log_level)
+
+    metrics = Registry()
+    metrics.describe("muninn_http_requests_total", "counter", "HTTP requests served")
+    metrics.describe("muninn_http_request_seconds", "histogram", "HTTP request duration")
+    metrics.describe("muninn_search_queue_wait_seconds", "histogram", "Time a search waited in the queue")
+    metrics.describe("muninn_search_engine_seconds", "histogram", "Search engine execution time")
+    metrics.describe("muninn_scrape_leg_seconds", "histogram", "Scrape leg duration")
+    metrics.describe("muninn_scrape_total", "counter", "Scrapes by outcome")
+    metrics.describe("muninn_search_queue_rejections_total", "counter", "Searches refused: queue full")
+    metrics.describe("muninn_search_rate_limited_total", "counter", "Searches refused: rate limit")
+    metrics.describe("muninn_scrape_rate_limited_total", "counter", "Scrapes refused: rate limit")
+    metrics.describe("muninn_cache_entries", "gauge", "Live entries in the search cache")
+    metrics.describe("muninn_scrape_cache_entries", "gauge", "Entries in the scrape cache")
+    metrics.describe("muninn_search_queue_depth", "gauge", "Depth of the search queue")
+    metrics.describe("muninn_browser_pool_jobs", "gauge", "Render jobs the browser pool has run")
+    metrics.describe("muninn_browser_pool_up", "gauge", "1 when the browser pool answers")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -82,7 +98,7 @@ def create_app(
         # served so a restart does not re-hammer an engine that just blocked us.
         engines = EngineManager(settings, store=EngineStateStore(cache.connection))
         await engines.restore()
-        service = SearchService(settings, driver, cache, engines)
+        service = SearchService(settings, driver, cache, engines, registry=metrics)
 
         # --- scrape module -------------------------------------------------
         politeness = HostPoliteness(
@@ -98,6 +114,7 @@ def create_app(
             politeness=politeness,
             cache=scrape_cache,
             browser_pool=pool,
+            registry=metrics,
         )
 
         await service.start()
@@ -114,6 +131,7 @@ def create_app(
         app.state.scrape_cache = scrape_cache
         app.state.scrape_limiter = limiter
         app.state.search_limiter = search_limiter
+        app.state.metrics = metrics
         app.state.started_at = time.time()
 
         yield
@@ -212,8 +230,9 @@ def create_app(
             "then 12 hours for consecutive failures) and the query is retried on "
             "the next active engine.\n\n"
             "Successful queries are cached in SQLite for `CACHE_TTL_SECONDS` and "
-            "replayed from cache on a repeat, which is why `force_refresh` still "
-            "returns and re-stores the result but reads through the engine."
+            "replayed from cache on a repeat. `force_refresh=true` bypasses the "
+            "cache in both directions: it reads through the engines and does not "
+            "store the result."
         ),
         response_model=SearchResponse,
         responses={
@@ -269,7 +288,11 @@ def create_app(
             "requested one is quarantined.",
             examples=["google"],
         ),
-        force_refresh: bool = Query(False, description="Bypass the cache for this read"),
+        force_refresh: bool = Query(
+            False,
+            description="Bypass the cache entirely: read through the engines and do "
+            "not store the result.",
+        ),
     ) -> SearchResponse | JSONResponse:
         if engine is not None and engine not in SUPPORTED_ENGINES:
             raise HTTPException(
@@ -381,6 +404,7 @@ def create_app(
 
     app.include_router(scrape_router)
     app.include_router(health_router)
+    app.include_router(metrics_router)
 
     # Unhandled exceptions: return a JSON envelope with a request id instead of
     # Starlette's plain-text 500 and stack trace. The id is echoed in the
@@ -392,8 +416,14 @@ def create_app(
     async def request_id_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
         request.state.request_id = request_id
+        # Skip the probe endpoints so scrapes do not inflate their own numbers.
+        endpoint = request.url.path
+        measured = endpoint not in {"/health/live", "/metrics"}
+        started = time.perf_counter()
         try:
             response = await call_next(request)
+            if measured:
+                _record(metrics, endpoint, response.status_code, time.perf_counter() - started)
         except Exception:
             logger.exception("unhandled error [request_id=%s] %s %s",
                              request_id, request.method, request.url.path)
@@ -410,6 +440,34 @@ def create_app(
         return response
 
     return app
+
+
+#: Paths that get their own metric series. Anything else is folded into
+#: "other" so an unauthenticated caller cannot create unbounded label values
+#: by requesting random paths - a real risk on a scrape-able /metrics endpoint.
+_KNOWN_ROUTES = frozenset(
+    {
+        "/",
+        "/search",
+        "/scrape",
+        "/status",
+        "/health",
+        "/health/live",
+        "/health/ready",
+        "/metrics",
+    }
+)
+
+
+def _record(
+    registry: Registry, endpoint: str, status: int, duration: float
+) -> None:
+    """One HTTP request into the registry."""
+    route = endpoint if endpoint in _KNOWN_ROUTES else "other"
+    registry.increment(
+        "muninn_http_requests_total", {"endpoint": route, "status": str(status)}
+    )
+    registry.observe("muninn_http_request_seconds", duration, {"endpoint": route})
 
 
 def run() -> None:

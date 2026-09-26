@@ -57,8 +57,9 @@ per-host politeness and a bounded TTL cache.
 6. [Security](#6-security)
 7. [Legal & ethical use](#7-legal--ethical-use)
 8. [Development](#8-development)
-9. [Project layout](#9-project-layout)
-10. [Troubleshooting](#10-troubleshooting)
+9. [Observability](#9-observability)
+10. [Project layout](#10-project-layout)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -248,7 +249,7 @@ reachable by someone you would not trust with the schema.
 | `q`              | string  | —       | required, 1–500 chars                    |
 | `max_results`    | int     | `10`    | 1–50                                     |
 | `engine`         | string  | —       | `google` \| `bing` \| `ddg` \| `mojeek`  |
-| `force_refresh`  | bool    | `false` | bypass the cache for the read           |
+| `force_refresh`  | bool    | `false` | bypass the cache entirely: read through the engines, do not store the result |
 
 ```bash
 curl "http://127.0.0.1:9999/search?q=python+web+scraping&max_results=5"
@@ -333,6 +334,8 @@ Everything is an environment variable; the full list with defaults lives in
 | `HOST` | `127.0.0.1` | Bind address; pass `--host` to uvicorn to override |
 | `PORT` | `9999` | Bind port |
 | `DOCS_ENABLED` | `true` | Serve `/docs` (Swagger UI), `/redoc` and `/openapi.json` |
+| `LOG_FORMAT` | `text` | `text` for a terminal, `json` for one JSON object per line |
+| `LOG_LEVEL` | `INFO` | Root log level |
 | `CACHE_DB_PATH` | `data/cache.db` | SQLite path (`:memory:` disables disk) |
 | `CACHE_TTL_SECONDS` | `86400` | Search cache TTL |
 | `THROTTLE_MIN_DELAY` | `15` | Min seconds between outbound searches |
@@ -527,7 +530,57 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow, and
 
 ---
 
-## 9. Project layout
+## 9. Observability
+
+Two endpoints, no metrics library.
+
+**`GET /status`** — human-facing JSON: queue depth, cache counts, per-engine
+circuit-breaker state and lifetime counters.
+
+**`GET /metrics`** — the same numbers in Prometheus text format, for scraping:
+
+```bash
+curl -s http://127.0.0.1:9999/metrics | head -30
+```
+
+What is exported, and why those numbers:
+
+| Metric | Type | What it tells you |
+|---|---|---|
+| `muninn_http_requests_total{endpoint,status}` | counter | traffic per endpoint, error rate |
+| `muninn_http_request_seconds{endpoint}` | histogram | where request time is spent |
+| `muninn_search_queue_wait_seconds` | histogram | time a search waited in the queue — this is the throttle, not the engine, and it is the usual answer to "why is search slow" |
+| `muninn_search_engine_seconds{engine}` | histogram | per-engine latency, so a slow engine is visible before it gets quarantined |
+| `muninn_scrape_leg_seconds{leg}` | histogram | `fast_path` vs `render` — shows what browser escalations cost |
+| `muninn_scrape_total{outcome}` | counter | `ok`, `sitemap`, `blocked`, `error` |
+| `muninn_search_queue_rejections_total` | counter | requests refused because the queue was full |
+| `muninn_*_rate_limited_total` | counter | requests refused by a rate limiter |
+
+Latency buckets are fixed at 5 ms … 60 s, chosen around the real costs (a cache
+hit is ~0 s, a fast-path fetch 0.1–2 s, a browser render 1–45 s, a queued search
+up to `REQUEST_TIMEOUT_SECONDS`).
+
+Label cardinality is bounded on purpose: only known routes get their own series
+and everything else is folded into `other`, so an anonymous caller cannot create
+unbounded series by requesting random paths.
+
+**Structured logs.** `LOG_FORMAT=json` switches every logger to one JSON object
+per line, which is what journald, Loki and CloudWatch want:
+
+```bash
+LOG_FORMAT=json make serve
+```
+
+```
+{"ts":"2026-09-26T21:04:12+0300","level":"INFO","logger":"app.search_service",
+ "message":"query='python web scraping' engine=google results=10 served"}
+```
+
+No dependencies were added for any of this.
+
+---
+
+## 10. Project layout
 
 ```
 app/                      FastAPI gateway, config, search cache, engine manager, queue
@@ -549,7 +602,7 @@ pyproject.toml            project metadata, ruff, mypy and pytest configuration
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 Failures a fresh clone on a new machine actually hits.
 

@@ -73,6 +73,26 @@ def test_force_refresh_bypasses_cache(client: TestClient, fake_driver: FakeDrive
     assert fake_driver.url_count == calls_after_first + 1
 
 
+def test_force_refresh_does_not_populate_the_cache(
+    client: TestClient, fake_driver: FakeDriver
+) -> None:
+    """force_refresh means "do not touch the cache" - read *and* write.
+
+    Previously the fresh result was stored anyway, so the flag name read as a
+    contradiction and a refresh-seeded entry outlived the caller's intent.
+    """
+    client.get("/search", params={"q": "no seed", "force_refresh": "true"})
+    calls_after_refresh = fake_driver.url_count
+
+    third = client.get("/search", params={"q": "no seed"})
+    assert third.json()["cached"] is False, "force_refresh must not have cached the result"
+    assert fake_driver.url_count == calls_after_refresh + 1
+
+    # And the skip is visible in the metrics.
+    metrics = client.get("/status").json()["metrics"]
+    assert metrics["cache_write_skips"] >= 1
+
+
 def test_round_robin_across_engines(client: TestClient) -> None:
     engines = []
     for i in range(4):
