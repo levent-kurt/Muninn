@@ -6,7 +6,7 @@
     1. create the service account once:
          sudo useradd -m -s /bin/bash muninn      # or use an existing account
     2. clone and set up as that user:
-         sudo -u muninn git clone https://github.com/levent-kurt/Muninn.git ~/muninn
+         sudo -u muninn git clone https://github.com/reachdevel/Muninn.git ~/muninn
          sudo -u muninn python3 -m venv ~/muninn/.venv
          sudo -u muninn ~/muninn/.venv/bin/pip install -r ~/muninn/requirements.txt
          sudo -u muninn ~/muninn/.venv/bin/python -m playwright install chromium

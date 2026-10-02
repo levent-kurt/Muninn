@@ -30,8 +30,8 @@ classifiers = [
 dynamic = ["dependencies", "optional-dependencies"]
 
 [project.urls]
-Homepage = "https://github.com/levent-kurt/Muninn"
-Issues = "https://github.com/levent-kurt/Muninn/issues"
+Homepage = "https://github.com/reachdevel/Muninn"
+Issues = "https://github.com/reachdevel/Muninn/issues"
 
 # ---------------------------------------------------------------------------
 # Tooling configuration (single source of truth for lint / types / tests).

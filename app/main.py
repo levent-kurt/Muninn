@@ -163,10 +163,10 @@ def create_app(
         ),
         version="0.1.0",
         lifespan=lifespan,
-        contact={"name": "Levent Kurt", "url": "https://github.com/levent-kurt/Muninn"},
+        contact={"name": "Levent Kurt", "url": "https://github.com/reachdevel/Muninn"},
         license_info={
             "name": "MIT",
-            "url": "https://github.com/levent-kurt/Muninn/blob/main/LICENSE",
+            "url": "https://github.com/reachdevel/Muninn/blob/main/LICENSE",
         },
         openapi_tags=[
             {

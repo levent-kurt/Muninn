@@ -75,7 +75,7 @@ fine).
 ### The short version (Linux and macOS)
 
 ```bash
-git clone https://github.com/levent-kurt/Muninn.git
+git clone https://github.com/reachdevel/Muninn.git
 cd Muninn
 make setup        # venv + dependencies + Chromium + its OS libraries
 make run          # http://127.0.0.1:9999/docs
@@ -179,7 +179,7 @@ restarted by the service manager, not by an init system of its own.
 
 ```bash
 sudo useradd --system --create-home --home-dir /opt/muninn muninn
-sudo -u muninn git clone https://github.com/levent-kurt/Muninn.git /opt/muninn/app
+sudo -u muninn git clone https://github.com/reachdevel/Muninn.git /opt/muninn/app
 sudo -u muninn python3 -m venv /opt/muninn/app/.venv
 sudo -u muninn /opt/muninn/app/.venv/bin/pip install -r /opt/muninn/app/requirements.txt
 sudo -u muninn /opt/muninn/app/.venv/bin/python -m playwright install chromium

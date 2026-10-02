@@ -93,4 +93,4 @@ under systemd or launchd.
   groups, `setsid` and `pgrep`/`ps`).
 - There is no container image; see the README for service-based deployment.
 
-[0.1.0]: https://github.com/levent-kurt/Muninn/releases/tag/v0.1.0
+[0.1.0]: https://github.com/reachdevel/Muninn/releases/tag/v0.1.0
