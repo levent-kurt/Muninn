@@ -51,8 +51,13 @@ class EngineState:
     total_requests: int = 0
     # Epoch timestamp (seconds) until which the engine is quarantined, or None.
     quarantined_until: float | None = None
-    # 1 = first-level quarantine (30m), 2 = escalated (12h).
+    # 1 = first failure, 2 = consecutive failures. The *duration* grows
+    # exponentially up to Settings.quarantine_escalated_seconds; the level only
+    # says whether this was the first failure or a repeat.
     quarantine_level: int = 0
+    # Class of the most recent failure ("block", "timeout", "network", "parse").
+    # Runtime-only: it explains the cooldown but is not worth persisting.
+    last_failure_class: str | None = None
 
     @property
     def active(self) -> bool:
@@ -71,6 +76,7 @@ class EngineState:
             "success_count": self.success_count,
             "total_requests": self.total_requests,
             "quarantine_level": self.quarantine_level,
+            "last_failure_class": self.last_failure_class,
             "quarantined_until": self.quarantined_until,
             "remaining_cooldown_seconds": self.remaining_cooldown(),
         }

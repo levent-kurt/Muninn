@@ -248,7 +248,7 @@ reachable by someone you would not trust with the schema.
 |------------------|---------|---------|------------------------------------------|
 | `q`              | string  | —       | required, 1–500 chars                    |
 | `max_results`    | int     | `10`    | 1–50                                     |
-| `engine`         | string  | —       | `google` \| `bing` \| `ddg` \| `mojeek`  |
+| `engine`         | string  | —       | `google` \| `bing` \| `ddg` \| `mojeek`. Quarantined ⇒ immediate `503`, never silently replaced |
 | `force_refresh`  | bool    | `false` | bypass the cache entirely: read through the engines, do not store the result |
 
 ```bash
@@ -268,9 +268,26 @@ curl "http://127.0.0.1:9999/search?q=python+web+scraping&max_results=5"
 }
 ```
 
-Status codes: `200` ok · `422` bad parameters · `429` rate limited (with
-`Retry-After`) · `503` every engine quarantined **or** the queue is full
-(both with `Retry-After`) · `504` timed out in the queue.
+Status codes — the split is deliberate, and a client can rely on it:
+
+| Code | Meaning | Body |
+|---|---|---|
+| `200` — served | possibly `cached: true`; cached results are free and never refused | `SearchResponse` |
+| `422` — invalid query | skip it and carry on | `detail` |
+| `429` — budget spent | per-client rate limit; `Retry-After` is honoured | `retry_after` |
+| `503` — cannot serve now | every engine quarantined, the pinned engine quarantined, the queue saturated, or the load breaker refusing while it recovers. Always has `Retry-After` | `reason`, `queue_depth`, `worker_state` |
+| `504` — the job failed | the job ran (or waited its full turn) and produced nothing: the job deadline expired, or the search failed | `detail` |
+
+A `503` costs the caller nothing and is the fast answer: a saturated or wedged
+search path is refused in milliseconds instead of after a two-minute wait.
+
+```bash
+# what the refusal looks like
+curl -si "http://127.0.0.1:9999/search?q=python" | head -3
+# HTTP/1.1 503 Service Unavailable
+# retry-after: 30
+# {"error":"not_draining","reason":"not_draining","queue_depth":19,"worker_state":"stuck",...}
+```
 
 ### `GET /scrape` — fetch + extract a page
 
@@ -312,14 +329,28 @@ r = httpx.get("http://127.0.0.1:9999/scrape", params={"url": "https://example.co
 print(r.json()["title"])
 ```
 
-### `GET /health` — liveness
+### `GET /health`, `/health/live`, `/health/ready`
 
-Reports the search driver, engine quarantine list, queue depth, cache size and
-the scrape pool state. A lazy worker that has not been used yet is **healthy**.
+`/health/live` is the cheap one a healthcheck polls — no database, no probe —
+and it carries the search worker and the load breaker, because a wedged search
+path used to be invisible from every other endpoint:
+
+```json
+{"status":"ok","queue_depth":19,
+ "worker":{"pid":1234,"state":"stuck","current_job_age_s":214.0,
+           "jobs_completed":1470,"jobs_killed":3,"restarts":0,"pool_size":2},
+ "breaker":{"state":"open","reason":"not_draining","open_for_seconds":12.5}}
+```
+
+`/health` is the deep report (engines, caches, rate limiter, browser pool).
+`/health/ready` answers from in-process state only. Note that readiness
+deliberately does **not** follow the breaker: an instance pulled out of rotation
+while it refuses work would never receive the probe that closes the breaker.
 
 ### `GET /status` — metrics
 
-Queue depth, cache entry count, per-engine state and request counters.
+Queue depth, worker and breaker state, cache entry count, per-engine state
+(including the class of the last failure) and request counters.
 
 ---
 
@@ -341,13 +372,31 @@ Everything is an environment variable; the full list with defaults lives in
 | `CACHE_TTL_SECONDS` | `86400` | Search cache TTL |
 | `THROTTLE_MIN_DELAY` | `15` | Min seconds between outbound searches |
 | `THROTTLE_MAX_DELAY` | `30` | Max seconds between outbound searches |
-| `QUARANTINE_FIRST_SECONDS` | `1800` | 1st 429/CAPTCHA → quarantine |
-| `QUARANTINE_ESCALATED_SECONDS` | `43200` | 2nd consecutive failure → quarantine |
+| `QUARANTINE_FIRST_SECONDS` | `300` | Base engine cooldown; doubled per consecutive failure, scaled by failure class |
+| `QUARANTINE_ESCALATED_SECONDS` | `1800` | Ceiling on an engine cooldown — never quarantine longer than this |
 | `DEFAULT_MAX_RESULTS` | `10` | Default value for `max_results` |
 | `MAX_MAX_RESULTS` | `50` | Hard cap for `max_results` |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Max time `/search` waits in the queue |
 | `MAX_SEARCH_QUEUE` | `100` | Search queue depth; deeper requests get `503` + `Retry-After` |
 | `SEARCH_RATE_LIMIT_PER_MINUTE` | `30` | Per-client `/search` budget; excess gets `429` |
+
+### Search path hardening
+
+These exist because the search path could wedge completely while `/health/*` and
+`/scrape` stayed fast: one hung engine call pinned the only worker, the queue
+stopped draining, and every query still waited its full 120 s before `504`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SEARCH_JOB_DEADLINE_SECONDS` | `45.0` | Hard deadline for one job (every engine attempt and retry). On expiry the job is killed, the engine in flight is charged a failure, and the worker is released |
+| `SEARCH_WORKER_COUNT` | `2` | Workers draining the queue; more than one keeps a hanging engine from taking the whole pool |
+| `SEARCH_MAX_CONCURRENT_PER_ENGINE` | `1` | Jobs allowed against one engine at a time |
+| `SEARCH_WORKER_STALL_GRACE_SECONDS` | `30.0` | Grace over the job deadline before a busy worker is called stuck |
+| `SEARCH_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before the breaker starts refusing work |
+| `SEARCH_BREAKER_STALL_SECONDS` | `120.0` | Non-empty queue with nothing completed for this long counts as stuck |
+| `SEARCH_MONITOR_INTERVAL_SECONDS` | `5.0` | Supervisor sampling interval |
+| `SEARCH_BREAKER_OPEN_SECONDS` | `30.0` | How long the breaker refuses everything before admitting one probe |
+| `SEARCH_BREAKER_MAX_OPEN_SECONDS` | `300.0` | Ceiling for the doubling back-off between probe rounds |
 
 ### Browser
 
@@ -405,14 +454,36 @@ for that workload.
 ## 5. How it works
 
 **Search.** Every uncached query becomes a job on a FIFO queue drained by a
-single worker, which enforces a randomized delay between outbound requests. The
-engine manager rotates engines round-robin; a 429 or CAPTCHA quarantines that
-engine (30 min, then 12 h for consecutive failures) and the job retries on the
-next active one. Quarantine state is written to SQLite, so restarting the
-service does not immediately re-hammer an engine that just blocked you. All
-four engines share one persistent Chromium, but each engine gets its own browser
-context, so cookies and DOM state never cross sites; every request opens a
-fresh page that is closed afterwards.
+small worker pool, which enforces a randomized delay between outbound requests.
+The engine manager rotates engines round-robin, one job per engine at a time; a
+429 or CAPTCHA quarantines that engine (5 minutes, doubling per consecutive
+failure and capped at 30, scaled down for a timeout or a network error) and the
+job retries on the next active one. Quarantine state is written to SQLite, so
+restarting the service does not immediately re-hammer an engine that just
+blocked you. All four engines share one persistent Chromium, but each engine gets
+its own browser context, so cookies and DOM state never cross sites; every
+request opens a fresh page that is closed afterwards.
+
+Three things keep the search path from wedging — a failure it used to have, in
+which `/health` and `/scrape` stayed fast while every search returned 504 after
+the caller's own timeout:
+
+1. **Every job runs under a hard deadline** (`SEARCH_JOB_DEADLINE_SECONDS`,
+   default 45 s) covering every engine attempt and retry. On expiry the job is
+   aborted, the engine that was in flight is charged one failure, and the worker
+   is released — the service heals itself instead of waiting for an operator.
+2. **Workers are supervised.** A worker that dies is replaced and the queue
+   entries it left behind are failed rather than left to rot. (This one was a
+   real bug: a worker resolving a future whose caller had already given up raised
+   `InvalidStateError` inside its own error handler and took the only worker with
+   it, after which the queue never drained again.)
+3. **A load breaker refuses fast.** When the queue is full, or the workers stop
+   draining, new work is turned away in milliseconds with `503` and a
+   machine-readable `reason` — instead of joining a queue that cannot empty.
+   After `SEARCH_BREAKER_OPEN_SECONDS` the breaker goes half-open and admits
+   exactly one probe: if that job completes, traffic resumes; if it fails, the
+   breaker re-opens with a longer backoff. Readiness deliberately ignores the
+   breaker, because an instance out of rotation would never get its probe back.
 
 **Scrape.** For each target:
 
@@ -515,7 +586,7 @@ make format      # auto-fix lint and formatting
 make run         # local dev server with reload
 ```
 
-The suite is **offline and fast** (~160 tests, a couple of seconds): no test
+The suite is **offline and fast** (263 tests, ~20 seconds): no test
 touches the network or launches a real browser.
 
 ```bash
@@ -552,6 +623,15 @@ What is exported, and why those numbers:
 | `muninn_http_request_seconds{endpoint}` | histogram | where request time is spent |
 | `muninn_search_queue_wait_seconds` | histogram | time a search waited in the queue — this is the throttle, not the engine, and it is the usual answer to "why is search slow" |
 | `muninn_search_engine_seconds{engine}` | histogram | per-engine latency, so a slow engine is visible before it gets quarantined |
+| `muninn_search_job_seconds{outcome}` | histogram | how long a job actually ran, split by outcome (`served`, `deadline`, `quarantined`, `failed`, `abandoned`) |
+| `muninn_search_jobs_total{outcome}` | counter | the same split as counts |
+| `muninn_search_deadline_kills_total{engine}` | counter | **jobs killed by the job deadline** — the leading indicator of a search path about to stop draining |
+| `muninn_engine_total{engine,outcome}` | counter | attempts per engine by outcome, where the failure label is the class (`block`, `timeout`, `network`, `parse`) — so "9 failures, 0 successes" is visible from metrics |
+| `muninn_search_breaker_state` | gauge | `0` closed, `1` half-open (probing), `2` open (refusing) |
+| `muninn_search_breaker_trips_total{reason}`, `muninn_search_breaker_rejections_total{reason}` | counter | why the breaker opened, and what it refused |
+| `muninn_search_worker_state` | gauge | worst worker state: `0` idle, `1` busy, `2` stuck, `3` dead |
+| `muninn_search_workers`, `muninn_search_worker_restarts_total` | gauge / counter | pool size, and how often the supervisor had to replace one |
+| `muninn_search_queue_stuck` | gauge | `1` when the queue is non-empty and nothing has completed recently — the wedge, as a number |
 | `muninn_scrape_leg_seconds{leg}` | histogram | `fast_path` vs `render` — shows what browser escalations cost |
 | `muninn_scrape_total{outcome}` | counter | `ok`, `sitemap`, `blocked`, `error` |
 | `muninn_cache_entries`, `muninn_scrape_cache_entries` | gauge | live entries in each cache |
@@ -559,6 +639,12 @@ What is exported, and why those numbers:
 | `muninn_browser_pool_up`, `muninn_browser_pool_jobs` | gauge | worker reachable, and how many renders it has run |
 | `muninn_search_queue_rejections_total` | counter | requests refused because the queue was full |
 | `muninn_*_rate_limited_total` | counter | requests refused by a rate limiter |
+
+**Alerts.** [`ops/prometheus_alerts.yml`](ops/prometheus_alerts.yml) is a
+ready-to-load rule file: it fires on a queue that is not draining, on a breaker
+that stays open, on a worker that keeps dying, on a run of deadline kills, and on
+an engine that fails repeatedly without ever succeeding. Load it with
+`rule_files:` — nothing else in the stack is required.
 
 Latency buckets are fixed at 5 ms … 60 s, chosen around the real costs (a cache
 hit is ~0 s, a fast-path fetch 0.1–2 s, a browser render 1–45 s, a queued search
@@ -611,7 +697,35 @@ pyproject.toml            project metadata, ruff, mypy and pytest configuration
 
 ## 11. Troubleshooting
 
-Failures a fresh clone on a new machine actually hits.
+Failures a fresh clone on a new machine actually hits, plus the one that is
+really a capacity question.
+
+### `/search` keeps returning `503`, or `504` after exactly 120 seconds
+
+Read `/status` first: it tells you which of the two problems you have.
+
+```bash
+curl -s localhost:9999/status | python3 -m json.tool | head -40
+curl -s localhost:9999/health/live        # worker state + breaker, still cheap
+```
+
+- `breaker.state: "open"` with `reason: "not_draining"` — the workers were not
+  draining, so Muninn refused new work instead of queueing behind it. It probes
+  itself every `SEARCH_BREAKER_OPEN_SECONDS` and recovers; if the breaker stays
+  open, the engine or the network is the real problem, and
+  `muninn_search_deadline_kills_total{engine="..."}` says which.
+- `reason: "queue_full"` — you are asking for more search throughput than the
+  throttle will serve. Throughput is 2–4 requests/minute by design; the fix is a
+  bigger cache hit rate or a longer `THROTTLE_*` budget, not a deeper queue.
+- `engines.*.status: "quarantined"` — check `last_failure_class`. A `timeout` or
+  `network` class usually clears itself; `block` means the engine is filtering
+  this IP. **`success_count: 0` with a rising `fail_count` is not a cooldown
+  problem** — that is a broken parser or a changed page, and clearing the
+  quarantine just re-trips it.
+- Everything active, queue empty, and still `504` — that is the per-job
+  deadline firing (`SEARCH_JOB_DEADLINE_SECONDS`). Raise it only together with
+  `REQUEST_TIMEOUT_SECONDS`: the service warns at startup when the throttle plus
+  the deadline can outlast the caller's read timeout.
 
 ### `ImportError: lxml.html.clean module is now a separate project lxml_html_clean`
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import pytest
 
@@ -177,12 +178,67 @@ def test_json_formatter_survives_unserialisable_extras() -> None:
     assert json.loads(formatter.format(record))["thing"]
 
 
+def test_each_histogram_gets_its_own_bucket_series() -> None:
+    """Regression: bucket lines were rendered under the *last* histogram's name.
+
+    With more than one histogram in the registry - which the app has, five - the
+    per-queue and per-engine latencies were all published as one of them, so the
+    histograms an operator reads to explain a slow search were mislabelled.
+    """
+    reg = Registry()
+    reg.observe("h_queue_seconds", 0.02)
+    reg.observe("h_engine_seconds", 3.0)
+
+    text = reg.render_text()
+    assert 'h_queue_seconds_bucket{le="0.025"} 1' in text
+    assert 'h_engine_seconds_bucket{le="5"} 1' in text
+    assert 'h_queue_seconds_bucket{le="+Inf"} 1' in text
+    assert 'h_engine_seconds_bucket{le="+Inf"} 1' in text
+    assert 'h_queue_seconds_count 1' in text
+    assert 'h_engine_seconds_count 1' in text
+
+
 @pytest.mark.parametrize("value", [0, 0.5, -1, 1_000_000, 0.0001])
 def test_number_formatting_is_valid_prometheus(value: float) -> None:
     reg = Registry()
     reg.set_gauge("g", value)
     line = next(x for x in reg.render_text().splitlines() if x.startswith("g "))
     float(line.split()[1])  # must parse
+
+
+def test_every_declared_search_metric_is_actually_emitted() -> None:
+    """Regression: `muninn_search_queue_wait_seconds` was describe()d and never
+    recorded, so it never appeared in the exposition at all.
+
+    It is the histogram that answers "why is search slow" - the throttle, not the
+    engine - so its absence is how a queue could stop draining with nothing left
+    a trace. Declaring a metric is not evidence that it exists.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import FakeDriver, make_test_settings
+
+    app = create_app(
+        settings=make_test_settings(), driver_factory=lambda s: FakeDriver()
+    )
+    with TestClient(app) as client:
+        client.get("/search", params={"q": "queue wait"})
+        text = client.get("/metrics").text
+
+    for name in (
+        "muninn_search_queue_wait_seconds_count",
+        "muninn_search_job_seconds_count",
+        "muninn_search_jobs_total",
+        "muninn_engine_total",
+        "muninn_search_worker_state",
+        "muninn_search_breaker_state",
+        "muninn_search_queue_stuck",
+        "muninn_search_workers",
+    ):
+        assert re.search(rf"^{re.escape(name)}(\{{[^}}]*\}})? \S+", text, re.M), (
+            f"{name} is declared but never emitted"
+        )
 
 
 # --------------------------------------------------------------------------- gauges

@@ -1,0 +1,138 @@
+# Prometheus alert rules for Muninn.
+#
+# Load them with:
+#   rule_files:
+#     - /path/to/muninn/ops/prometheus_alerts.yml
+#
+# Every rule here is about the failure mode that shipped without warning: the
+# search path wedged while /health answered in 80ms and /scrape in 200ms, so
+# nothing was firing and `circuit_breaker_trips` and `queue_rejections` both read
+# zero. Each alert catches that wedge, or the condition that precedes it.
+
+groups:
+  - name: muninn-search-path
+    rules:
+      # The wedge itself: the queue is not draining. Deliberately not "depth > N"
+      # - a queue can be small and still permanently stuck, and a slow drain
+      # under the throttle is healthy.
+      - alert: MuninnSearchQueueNotDraining
+        expr: muninn_search_queue_stuck == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Muninn's search queue has stopped draining"
+          description: >-
+            The queue is non-empty and no job has completed for
+            SEARCH_BREAKER_STALL_SECONDS, so /search is refusing new work with
+            503. Check muninn_search_worker_state and
+            muninn_search_breaker_state for the cause.
+
+      # The breaker refusing traffic is the service saying it gave up waiting for
+      # itself. It recovers on its own via the half-open probe; if it does not,
+      # this is why.
+      - alert: MuninnSearchBreakerOpen
+        expr: muninn_search_breaker_state == 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Search load breaker has been refusing for over 5 minutes"
+          description: >-
+            The breaker opened and no probe has closed it, which it normally
+            does within SEARCH_BREAKER_OPEN_SECONDS. Reason is in
+            muninn_search_breaker_trips_total. A breaker that stays open means
+            the search path needs an operator.
+
+      # A worker that keeps dying takes capacity with it: the pool is only
+      # SEARCH_WORKER_COUNT wide.
+      - alert: MuninnSearchWorkerRestarting
+        expr: increase(muninn_search_worker_restarts_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A search worker died and was replaced"
+          description: >-
+            The supervisor replaced a search worker in the last 15 minutes.
+            Whatever that worker had queued was failed.
+
+      - alert: MuninnSearchWorkerStuck
+        expr: muninn_search_worker_state == 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A search worker is busy well past the job deadline"
+          description: >-
+            A job outlived SEARCH_JOB_DEADLINE_SECONDS by more than
+            SEARCH_WORKER_STALL_GRACE_SECONDS. The breaker will refuse new work
+            shortly if this persists.
+
+      # The leading indicator: jobs dying at the deadline while the pool is
+      # still serving. The offending engine is charged the failure, so this
+      # usually shows up as a shrinking pool before it shows up as an outage.
+      - alert: MuninnSearchDeadlineKills
+        expr: increase(muninn_search_deadline_kills_total[10m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Search jobs are being killed at the deadline"
+          description: >-
+            Jobs in the last 10m hit SEARCH_JOB_DEADLINE_SECONDS. Split by the
+            `engine` label to find the one that is not answering.
+
+      - alert: MuninnSearchRefusalsSustained
+        expr: sum(rate(muninn_search_breaker_rejections_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Muninn is refusing search work"
+          description: >-
+            Sustained refusals mean more search throughput is being asked for
+            than the throttle can serve. The `reason` label separates a capacity
+            problem (breaker_open) from a burst (queue_full).
+
+  - name: muninn-search-engines
+    rules:
+      # One failing engine must not take the pool down with it. This fires while
+      # the others still answer, which is the point: with a four-engine pool,
+      # three quarantines leave one.
+      - alert: MuninnEngineFailingWithNoSuccesses
+        expr: |
+          sum by (engine) (increase(muninn_engine_total{outcome!="success"}[1h])) >= 3
+          unless
+          sum by (engine) (increase(muninn_engine_total{outcome="success"}[1h]))
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.engine }} keeps failing and has served nothing in an hour"
+          description: >-
+            Failures with zero successes mean a broken parser, URL or block
+            page - not a cooldown that was too short. Check /status for
+            last_failure_class before clearing the quarantine: a CAPTCHA, a
+            timeout and a schema change need different fixes.
+
+  - name: muninn-gateway
+    rules:
+      - alert: MuninnEndpointFailing
+        expr: >-
+          sum(rate(muninn_http_requests_total{status=~"5.."}[5m])) by (endpoint)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.endpoint }} is returning 5xx"
+          description: "Sustained 5xx rate on {{ $labels.endpoint }}."
+
+      - alert: MuninnScrapeBrowserPoolDown
+        expr: muninn_browser_pool_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The scrape browser pool is unreachable"
+          description: >-
+            /scrape escalations cannot run. /search is unaffected and keeps
+            answering.

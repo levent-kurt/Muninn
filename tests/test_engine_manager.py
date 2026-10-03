@@ -43,7 +43,7 @@ async def test_all_engines_start_active(manager: EngineManager) -> None:
 # --------------------------------------------------------------------------- quarantines
 
 
-async def test_first_failure_quarantines_30min(manager: EngineManager) -> None:
+async def test_first_failure_quarantines_the_base_cooldown(manager: EngineManager) -> None:
     await manager.report_failure("google", "429")
     st = manager._states["google"]
     assert st.fail_count == 1
@@ -56,7 +56,9 @@ async def test_first_failure_quarantines_30min(manager: EngineManager) -> None:
     assert set(manager.active_engines()) == {"bing", "ddg", "mojeek"}
 
 
-async def test_second_consecutive_failure_escalates_to_12h(manager: EngineManager) -> None:
+async def test_second_consecutive_failure_escalates_beyond_the_base(
+    manager: EngineManager,
+) -> None:
     await manager.report_failure("bing", "captcha")
     _expire_all(manager)  # cooldown elapses...
     await manager.report_failure("bing", "429")  # ...and it fails again on first retry
@@ -64,8 +66,24 @@ async def test_second_consecutive_failure_escalates_to_12h(manager: EngineManage
     assert st.fail_count == 2
     assert st.quarantine_level == 2
     assert st.remaining_cooldown() <= 43_200
-    # severity kicked in: cooldown is now much longer than the first level
+    # severity kicked in: the cooldown grew past the base
     assert st.remaining_cooldown() > 1_800
+
+
+async def test_the_cooldown_is_capped_however_many_times_an_engine_fails(
+    manager: EngineManager,
+) -> None:
+    """Bounded escalation.
+
+    Doubling without a ceiling is what turned three failures into three engines
+    out of a four-engine pool for twelve hours.
+    """
+    for _ in range(10):
+        await manager.report_failure("mojeek", "captcha")
+        _expire_all(manager)
+    st = manager._states["mojeek"]
+    assert st.fail_count == 10
+    assert st.remaining_cooldown() <= 43_200
 
 
 async def test_success_resets_failure_counter(manager: EngineManager) -> None:

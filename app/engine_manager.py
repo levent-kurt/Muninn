@@ -3,9 +3,19 @@
 Owns the per-engine state, enforces the Round-Robin selection across *active*
 (non-quarantined) engines, and implements the quarantine escalation policy:
 
-* Fail #1 (429 / CAPTCHA)  -> 30 minutes (configurable).
-* Fail #2+ (consecutive)   -> 12 hours (configurable).
-* Any success              -> resets the consecutive failure counter.
+* Fail #1 (429 / CAPTCHA)  -> ``quarantine_first_seconds`` (5 minutes by default).
+* Fail #2+ (consecutive)   -> doubling per failure, capped at
+  ``quarantine_escalated_seconds`` (30 minutes by default).
+
+The cap is the point. The policy used to escalate straight to 12 hours, and
+because the pool is only four engines, three quarantines took the service from
+four engines to one for the best part of a day - one bad engine, no capacity.
+Bounded cooldowns with frequent re-probes keep capacity, and the exponential
+growth still means a persistently broken engine is left alone for a while.
+
+Failures are also *classified* (see :data:`FAILURE_CLASSES`): a CAPTCHA, a DNS
+blip, a changed page shape and a timeout are different problems and do not all
+deserve the same cooldown.
 
 Quarantined engines are dropped from rotation; if every engine is quarantined
 the manager raises :class:`AllEnginesQuarantinedError` and the API returns 503.
@@ -26,8 +36,47 @@ import time
 from app.config import SUPPORTED_ENGINES, Settings
 from app.engine_state_store import EngineStateStore
 from app.models import EngineState
+from ops.metrics import Registry
 
 logger = logging.getLogger(__name__)
+
+#: The failure classes an engine outcome can fall into. Kept closed because the
+#: class is reported in ``/status`` and is an operator-facing contract.
+FAILURE_CLASSES = ("block", "timeout", "network", "parse")
+
+#: How much of the base cooldown each class earns.
+#:
+#: A block/challenge is the engine telling us to go away, so it earns the full
+#: cooldown. A timeout, a network error or a page whose shape changed are weaker
+#: signals: they are often transient, and quarantining hard for them throws away
+#: pool capacity for nothing.
+FAILURE_CLASS_WEIGHTS: dict[str, float] = {
+    "block": 1.0,
+    "timeout": 0.5,
+    "network": 0.5,
+    "parse": 0.5,
+}
+
+# Reason substrings that pin a report to a class. Matched case-insensitively as
+# a substring so "HTTP 429", "captcha-redirect" and "job-deadline" all land.
+_FAILURE_CLASS_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("timeout", ("timeout", "timed out", "deadline", "budget")),
+    ("network", ("network", "dns", "connection", "reset", "refused", "econn", "unreachable")),
+    ("parse", ("parse", "schema", "no-results", "no results", "unexpected-html")),
+)
+
+#: What a reason means when nothing more specific matches: the engine gave us
+#: nothing usable, which for a residential IP is what being filtered looks like.
+DEFAULT_FAILURE_CLASS = "block"
+
+
+def classify_failure(reason: str) -> str:
+    """Map a failure reason onto one of :data:`FAILURE_CLASSES`."""
+    lowered = reason.lower()
+    for failure_class, hints in _FAILURE_CLASS_HINTS:
+        if any(hint in lowered for hint in hints):
+            return failure_class
+    return DEFAULT_FAILURE_CLASS
 
 
 class AllEnginesQuarantinedError(Exception):
@@ -41,9 +90,11 @@ class EngineManager:
         self,
         settings: Settings,
         store: EngineStateStore | None = None,
+        registry: Registry | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
+        self._registry = registry
         self._states: dict[str, EngineState] = {
             name: EngineState(name=name) for name in SUPPORTED_ENGINES
         }
@@ -112,6 +163,16 @@ class EngineManager:
         """Names of engines currently eligible for rotation."""
         return [name for name, st in self._states.items() if st.active]
 
+    def is_available(self, engine: str) -> bool:
+        """Whether ``engine`` may serve a request right now.
+
+        Distinct from rotation: a *pinned* request cannot silently fall back to
+        another engine, so the caller needs to be told when the one it named is
+        out rather than waiting for an answer that was never coming.
+        """
+        state = self._states.get(engine)
+        return state is not None and state.active
+
     async def status(self) -> dict[str, dict]:
         """Full state snapshot for ``GET /status`` and ``GET /health``."""
         async with self._lock:
@@ -150,31 +211,68 @@ class EngineManager:
             st.success_count += 1
             st.total_requests += 1
             logger.debug("engine=%s ok (successes=%d)", engine, st.success_count)
+        self._count(engine, "success")
         await self._persist(self._states[engine])
 
     async def report_failure(self, engine: str, reason: str) -> None:
-        """Record a 429/CAPTCHA failure and quarantine the engine."""
+        """Record a failed search against ``engine`` and quarantine it.
+
+        The cooldown is ``quarantine_first_seconds`` scaled by the failure class
+        and doubled per consecutive failure, capped at
+        ``quarantine_escalated_seconds``. Only this engine is affected: one bad
+        engine must never take the whole pool out, because the pool is four
+        engines and losing three leaves one.
+        """
+        failure_class = classify_failure(reason)
         async with self._lock:
             st = self._states[engine]
             st.total_requests += 1
             st.fail_count += 1
+            st.last_failure_class = failure_class
 
-            first = self._settings.quarantine_first_seconds
-            esca = self._settings.quarantine_escalated_seconds
-            if st.fail_count >= 2:
-                st.quarantine_level = 2
-                duration = esca
-                logger.warning(
-                    "engine=%s failed %d consecutive times -> escalated quarantine "
-                    "(%ds / %dh)",
-                    engine, st.fail_count, esca, esca // 3600,
-                )
-            else:
-                st.quarantine_level = 1
-                duration = first
-                logger.warning(
-                    "engine=%s failed (%s) -> first-level quarantine (%ds / %dm)",
-                    engine, reason, first, first // 60,
-                )
+            duration = self._cooldown_seconds(st.fail_count, failure_class)
+            st.quarantine_level = 1 if st.fail_count == 1 else 2
             st.quarantined_until = time.time() + duration
+            if st.success_count == 0 and st.fail_count >= 2:
+                # Worth saying out loud: a longer cooldown cannot fix an engine
+                # that has never once answered. Resetting its deadline without
+                # diagnosing just re-trips it.
+                logger.warning(
+                    "engine=%s has failed %d times (%s) and never succeeded; a "
+                    "longer quarantine will not help - check the parser and the "
+                    "engine URL before clearing the cooldown",
+                    engine, st.fail_count, failure_class,
+                )
+            logger.warning(
+                "engine=%s failed (%s/%s) -> quarantine level %d for %ds",
+                engine, failure_class, reason, st.quarantine_level, duration,
+            )
+        self._count(engine, failure_class)
         await self._persist(st)
+
+    def _count(self, engine: str, outcome: str) -> None:
+        """Per-engine outcome counter, so ``/metrics`` can answer which engine.
+
+        Failure classes are labels here: "google: 9 blocks, 0 successes" is a
+        parser problem and "google: 9 timeouts" is a network one, and neither is
+        visible in a single success/fail number.
+        """
+        if self._registry is not None:
+            self._registry.increment(
+                "muninn_engine_total", {"engine": engine, "outcome": outcome}
+            )
+
+    def _cooldown_seconds(self, fail_count: int, failure_class: str) -> int:
+        """Bounded exponential backoff for one engine's consecutive failures.
+
+        ``0`` stays ``0``: a configured base or cap of zero means "do not
+        quarantine", which is a legitimate (test/bench) setting and not this
+        policy's business to overrule.
+        """
+        base = float(self._settings.quarantine_first_seconds)
+        weight = FAILURE_CLASS_WEIGHTS.get(failure_class, 1.0)
+        escalations = max(0, fail_count - 1)
+        duration = base * weight * (2**escalations)
+        cap = float(self._settings.quarantine_escalated_seconds)
+        return max(0, int(min(cap, duration)))
+

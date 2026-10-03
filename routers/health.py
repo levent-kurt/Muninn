@@ -9,12 +9,17 @@ Monitors and reports status for BOTH sides of the gateway:
 Three endpoints, deliberately, because they cost very different amounts:
 
 ``/health/live``
-    Process liveness. No database query, no call into the worker. This is what a
-    container healthcheck should poll, because it runs every few seconds.
+    Process liveness, plus the search worker and the load breaker: pid, state,
+    in-flight job age and job counters. Still no I/O, because a healthcheck
+    polls it every few seconds - but it is no longer blind, which is how a dead
+    worker with a populated queue could look exactly like a healthy idle one.
 
 ``/health/ready``
     Readiness from in-process state only: is the browser up and is at least one
-    search engine usable? No probes, so a load balancer can use it.
+    search engine usable? No probes, so a load balancer can use it. Note that
+    readiness deliberately does *not* follow the breaker: taking the instance out
+    of rotation while it refuses would starve the half-open probe that closes
+    it, which is precisely how a breaker latches forever.
 
 ``/health``
     The full picture, including a live worker probe and cache counts. For a
@@ -31,14 +36,20 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
 
+from app.search_breaker import CLOSED
+
 if TYPE_CHECKING:
     from browser_pool.manager import PoolStatus
 
 router = APIRouter(tags=["health"])
 
 
-def _verdict(active: list[str], pool_status: PoolStatus) -> str:
+def _verdict(active: list[str], pool_status: PoolStatus, breaker_state: str) -> str:
     if not active:
+        return "degraded"
+    if breaker_state != CLOSED:
+        # The search path is refusing work while it recovers. /scrape is
+        # unaffected, so this is a partial fault, not an outage.
         return "degraded"
     if pool_status.mode == "external" and not pool_status.ok:
         return "degraded"
@@ -67,6 +78,14 @@ def _verdict(active: list[str], pool_status: PoolStatus) -> str:
                         "active_engines": ["google", "bing", "ddg", "mojeek"],
                         "quarantined_engines": [],
                         "uptime_seconds": 3600,
+                        "worker": {
+                            "pid": 1234,
+                            "state": "idle",
+                            "current_job_age_s": 0.0,
+                            "jobs_completed": 32,
+                            "pool_size": 2,
+                        },
+                        "breaker": {"state": "closed", "reason": None},
                         "fetcher": {
                             "status": "ok",
                             "engine": "httpx-fast-path",
@@ -104,15 +123,18 @@ async def health(request: Request) -> dict[str, Any]:
     pool_status = await pool.status()
     scrape_cache = request.app.state.scrape_cache
     limiter = request.app.state.scrape_limiter
+    breaker = service.breaker_status()
 
     return {
-        "status": _verdict(active, pool_status),
+        "status": _verdict(active, pool_status, str(breaker["state"])),
         "browser_ready": driver is not None and driver.is_started,
         "queue_depth": service.queue_depth,
         "cache_entries": await cache.count(),
         "active_engines": active,
         "quarantined_engines": [e for e in engine_mgr.engines if e not in active],
         "uptime_seconds": int(time.time() - request.app.state.started_at),
+        "worker": service.worker_status(),
+        "breaker": breaker,
         "fetcher": {
             "status": "ok",
             "engine": "httpx-fast-path",
@@ -144,13 +166,33 @@ async def health(request: Request) -> dict[str, Any]:
     "/health/live",
     summary="Liveness probe",
     description="Cheap process liveness: no database query and no worker probe. "
-    "This is the endpoint the container healthcheck polls.",
+    "This is the endpoint the container healthcheck polls. It carries the search "
+    "worker (pid, state, in-flight job age, jobs completed) and the load breaker, "
+    "so a wedged search path shows up here instead of only in /search timings.",
     responses={
         200: {
             "description": "The process is up.",
             "content": {
                 "application/json": {
-                    "example": {"status": "ok", "uptime_seconds": 3600, "queue_depth": 0}
+                    "example": {
+                        "status": "ok",
+                        "uptime_seconds": 3600,
+                        "queue_depth": 19,
+                        "worker": {
+                            "pid": 1234,
+                            "state": "stuck",
+                            "current_job_age_s": 214.0,
+                            "jobs_completed": 1470,
+                            "jobs_killed": 3,
+                            "restarts": 0,
+                            "pool_size": 2,
+                        },
+                        "breaker": {
+                            "state": "open",
+                            "reason": "not_draining",
+                            "open_for_seconds": 12.5,
+                        },
+                    }
                 }
             },
         }
@@ -163,6 +205,8 @@ async def health_live(request: Request) -> dict[str, Any]:
         "status": "ok",
         "uptime_seconds": int(time.time() - request.app.state.started_at),
         "queue_depth": service.queue_depth,
+        "worker": service.worker_status(),
+        "breaker": service.breaker_status(),
     }
 
 
@@ -170,7 +214,10 @@ async def health_live(request: Request) -> dict[str, Any]:
     "/health/ready",
     summary="Readiness probe",
     description="Answers whether traffic should be routed here, using in-process "
-    "state only (browser up, at least one usable search engine). No I/O.",
+    "state only (browser up, at least one usable search engine). No I/O. The "
+    "search load breaker is reported but deliberately does not affect readiness: "
+    "an instance pulled out of rotation while it refuses work would never get "
+    "the probe that closes the breaker.",
     responses={
         200: {
             "description": "Readiness verdict.",
@@ -180,6 +227,7 @@ async def health_live(request: Request) -> dict[str, Any]:
                         "status": "ok",
                         "ready": True,
                         "active_engines": ["google", "bing", "ddg", "mojeek"],
+                        "breaker": {"state": "closed", "reason": None},
                     }
                 }
             },
@@ -190,10 +238,13 @@ async def health_ready(request: Request) -> dict[str, Any]:
     """Readiness from in-process state, without the deep probes."""
     engine_mgr = request.app.state.engines
     driver = request.app.state.driver
+    service = request.app.state.service
     active = engine_mgr.active_engines()
     ready = bool(active) and driver is not None and driver.is_started
     return {
         "status": "ok" if ready else "degraded",
         "ready": ready,
         "active_engines": active,
+        # Reported, not enforced - see the endpoint description.
+        "breaker": service.breaker_status(),
     }

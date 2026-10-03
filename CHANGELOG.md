@@ -4,6 +4,100 @@ All notable changes to Muninn are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Search-path hardening. The search path could wedge completely while `/health/*`
+and `/scrape` stayed fast: `queue_depth` froze, every `/search` returned `504`
+after the caller's own 120 s read timeout, and both `circuit_breaker_trips` and
+`queue_rejections` stayed at zero, so nothing reported a fault.
+
+### Fixed
+
+- **The queue stopped draining, permanently.** A caller that gave up at its own
+  read timeout cancelled the job future (`wait_for` cancels what it awaits), and
+  the worker later died resolving it: `set_result` on a cancelled future raised
+  `InvalidStateError`, the `except Exception` around it raised `InvalidStateError`
+  again on the same future, and that second one propagated out of the only worker
+  in the process. Nothing supervised it, so from then on nothing drained the
+  queue and every query timed out at 120 s while the health endpoints kept
+  answering in 80 ms. The job future is now awaited through a shield, settlement
+  can never raise into a worker, and workers are supervised.
+- **One hung upstream call could pin a worker indefinitely.** Every job now runs
+  under a hard deadline (`SEARCH_JOB_DEADLINE_SECONDS`, default 45 s) covering
+  every engine attempt and retry. On expiry the job is aborted, the engine in
+  flight is charged one failure, and the worker is released.
+- **Histogram bucket series were published under the wrong metric name.** With
+  more than one histogram in the registry, every `*_bucket` line was rendered
+  under whichever name happened to be bound last, so per-queue and per-engine
+  latencies were mislabelled in `/metrics`.
+- **`muninn_search_queue_wait_seconds` was declared and never recorded**, so the
+  histogram that answers "why is search slow" never appeared in the exposition.
+  A test now asserts that every declared search metric is actually emitted.
+- **Engine quarantines escalated to 12 hours.** With a four-engine pool that
+  turns three failures into a one-engine pool for most of a day. Cooldowns are
+  now exponential per consecutive failure and capped at 30 minutes
+  (`QUARANTINE_ESCALATED_SECONDS`), from a 5-minute base
+  (`QUARANTINE_FIRST_SECONDS`), so engines are re-probed often and capacity
+  survives.
+- **A test needed a downloaded Chromium.** `test_docs_can_be_disabled` built a
+  real `BrowserDriver` instead of injecting the fake one every other test uses,
+  so it could only pass where `make browsers` had been run.
+
+### Added
+
+- **A search load breaker** (`app/search_breaker.py`) that refuses new search work
+  in milliseconds when the queue is full or the workers are not draining,
+  answering `503` with a machine-readable `reason`, `queue_depth` and
+  `worker_state`, plus `Retry-After`. After refusing for
+  `SEARCH_BREAKER_OPEN_SECONDS` it goes half-open and admits exactly one probe
+  request: a completed job closes it, a failed or timed-out job re-opens it with a
+  longer backoff, so it recovers without a restart instead of latching.
+- **Worker supervision.** A worker that dies is replaced, and the queue entries it
+  left behind are failed rather than left to rot. Worker identity, state,
+  in-flight job age, jobs completed, jobs killed and restarts are on
+  `/health/live`, `/health` and `/status`.
+- **Engine failure classes.** A CAPTCHA/429, a timeout, a network error and a
+  schema change are classified separately (`block`, `timeout`, `network`,
+  `parse`), weighted differently when the cooldown is computed, and reported as
+  `last_failure_class` in `/status`. Repeated failures with zero successes log a
+  warning, because a longer cooldown cannot fix an engine that never answered.
+- **Concurrency isolation.** A small worker pool (`SEARCH_WORKER_COUNT`, default
+  2) with a per-engine concurrency cap
+  (`SEARCH_MAX_CONCURRENT_PER_ENGINE`), so a hanging engine occupies one worker
+  and cannot consume the capacity of the healthy ones.
+- **Abandoned requests stop consuming a worker.** `/search` polls for a client
+  disconnect while waiting and abandons the job; the deadline remains the
+  guarantee, not this.
+- **Search observability:** `muninn_search_job_seconds{outcome}` and
+  `muninn_search_jobs_total{outcome}`, `muninn_search_deadline_kills_total{engine}`,
+  `muninn_engine_total{engine,outcome}`, `muninn_search_breaker_state`,
+  `muninn_search_breaker_trips_total{reason}`,
+  `muninn_search_breaker_rejections_total{reason}`, `muninn_search_worker_state`,
+  `muninn_search_workers`, `muninn_search_worker_restarts_total` and
+  `muninn_search_queue_stuck`.
+- **Alert rules** in `ops/prometheus_alerts.yml`: a queue that is not draining, a
+  breaker that stays open, a worker that keeps dying, a run of deadline kills, and
+  an engine failing without ever succeeding.
+- **Acceptance tests** for all six criteria in `tests/test_search_resilience.py`,
+  including a replay of the incident itself.
+
+### Changed
+
+- **Pinning a quarantined engine is refused immediately** with
+  `503 {"error": "engine_quarantined", "engine": "ddg"}` instead of being
+  silently rotated to another engine, which was useless for a caller pinning an
+  engine for a `site:` query.
+- **`503` and `504` now mean different things.** `503` is "I cannot serve this
+  now" (breaker open, queue saturated, engine quarantined); `504` is reserved for
+  a job that actually ran and failed, including a job killed at its deadline.
+  `200`/`422`/`429` are unchanged, and cached answers (`cached: true`) stay free
+  and are never refused by a saturated search path.
+- **Readiness ignores the load breaker, deliberately.** An instance pulled out of
+  rotation while it refuses work would never receive the probe that closes the
+  breaker, which is exactly how a breaker latches forever.
+- The service warns at startup when the throttle plus the job deadline can exceed
+  `REQUEST_TIMEOUT_SECONDS`, because callers give up before the worker does.
+
 ## [0.1.0] - 2026-09-26
 
 First public release: a self-hosted search gateway with an isolated

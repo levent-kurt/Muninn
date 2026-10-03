@@ -73,6 +73,13 @@ def make_test_settings(**overrides) -> Settings:
         "scrape_rate_limit_per_minute": 100_000,
         "search_rate_limit_per_minute": 100_000,
         "max_search_queue": 1_000,
+        # Short job deadline so a test that stalls an engine settles fast, and
+        # coherent with request_timeout_seconds above (the service warns at
+        # startup when throttle + deadline can outlast the caller).
+        "search_job_deadline_seconds": 5.0,
+        # The supervisor samples fast here so a test does not have to sleep for
+        # the production interval to notice a dead worker.
+        "search_monitor_interval_seconds": 0.5,
     }
     base.update(overrides)
     return Settings(**base)

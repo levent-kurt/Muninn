@@ -157,8 +157,13 @@ class Registry:
                 cumulative = _cumulative(hist[3:])
                 for i, edge in enumerate(buckets):
                     labels_with_le = labels + (("le", _num(edge)),)
+                    # hist_name, not the leaked `name` from the histogram
+                    # collection loop: with more than one histogram the bucket
+                    # series were emitted under whichever name happened to be
+                    # bound last, so per-job and per-engine latencies were
+                    # published as the wrong metric.
                     lines.append(
-                        f"{name}_bucket{_format_labels(labels_with_le)} "
+                        f"{hist_name}_bucket{_format_labels(labels_with_le)} "
                         f"{_num(cumulative[i])}"
                     )
                 lines.append(

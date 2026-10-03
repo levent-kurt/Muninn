@@ -25,7 +25,13 @@ from app.config import SUPPORTED_ENGINES, Settings, get_settings
 from app.engine_manager import AllEnginesQuarantinedError, EngineManager
 from app.engine_state_store import EngineStateStore
 from app.models import SearchResponse
-from app.search_service import SearchQueueFullError, SearchService
+from app.search_service import (
+    ClientDisconnectedError,
+    EngineQuarantinedError,
+    SearchJobFailedError,
+    SearchService,
+    SearchUnavailableError,
+)
 from browser_pool.manager import BrowserPoolManager
 from drivers.browser_driver import BrowserDriver, BrowserDriverError
 from fetchers.fast_path import FastPathFetcher
@@ -63,6 +69,57 @@ def create_app(
     metrics.describe("muninn_http_request_seconds", "histogram", "HTTP request duration")
     metrics.describe("muninn_search_queue_wait_seconds", "histogram", "Time a search waited in the queue")
     metrics.describe("muninn_search_engine_seconds", "histogram", "Search engine execution time")
+    metrics.describe(
+        "muninn_search_job_seconds",
+        "histogram",
+        "End-to-end search job duration (execution only, excludes queue wait)",
+    )
+    metrics.describe(
+        "muninn_search_jobs_total",
+        "counter",
+        "Search jobs by outcome: served, quarantined, failed, deadline, abandoned",
+    )
+    metrics.describe(
+        "muninn_search_deadline_kills_total",
+        "counter",
+        "Jobs killed by the per-job execution deadline, by the engine in flight",
+    )
+    metrics.describe(
+        "muninn_search_breaker_trips_total",
+        "counter",
+        "Search load-breaker openings, by reason",
+    )
+    metrics.describe(
+        "muninn_search_breaker_rejections_total",
+        "counter",
+        "Searches refused by the load breaker, by reason",
+    )
+    metrics.describe(
+        "muninn_search_breaker_state",
+        "gauge",
+        "Load breaker: 0 closed, 1 half-open (probing), 2 open (refusing)",
+    )
+    metrics.describe(
+        "muninn_search_worker_state",
+        "gauge",
+        "Worst search-worker state: 0 idle, 1 busy, 2 stuck, 3 dead",
+    )
+    metrics.describe("muninn_search_workers", "gauge", "Search workers in the pool")
+    metrics.describe(
+        "muninn_search_worker_restarts_total",
+        "counter",
+        "Search workers replaced by the supervisor",
+    )
+    metrics.describe(
+        "muninn_search_queue_stuck",
+        "gauge",
+        "1 when the search queue is non-empty and nothing has completed recently",
+    )
+    metrics.describe(
+        "muninn_engine_total",
+        "counter",
+        "Search engine attempts by engine and outcome (success, block, timeout, network, parse)",
+    )
     metrics.describe("muninn_scrape_leg_seconds", "histogram", "Scrape leg duration")
     metrics.describe("muninn_scrape_total", "counter", "Scrapes by outcome")
     metrics.describe("muninn_search_queue_rejections_total", "counter", "Searches refused: queue full")
@@ -96,7 +153,9 @@ def create_app(
         # The engine manager needs the open cache connection to make its
         # circuit-breaker state durable, and is restored before any traffic is
         # served so a restart does not re-hammer an engine that just blocked us.
-        engines = EngineManager(settings, store=EngineStateStore(cache.connection))
+        engines = EngineManager(
+            settings, store=EngineStateStore(cache.connection), registry=metrics
+        )
         await engines.restore()
         service = SearchService(settings, driver, cache, engines, registry=metrics)
 
@@ -224,16 +283,25 @@ def create_app(
         summary="Execute a search",
         description=(
             "Runs `q` against a search engine through the stealth browser.\n\n"
-            "Uncached queries join a FIFO queue drained by a single worker that "
-            "enforces a randomized delay between outbound requests, which keeps "
-            "a residential IP well below quota. Engines rotate round-robin; an "
-            "engine that answers 429 or a CAPTCHA is quarantined (30 minutes, "
-            "then 12 hours for consecutive failures) and the query is retried on "
-            "the next active engine.\n\n"
+            "Uncached queries join a FIFO queue drained by a small worker pool "
+            "that enforces a randomized delay between outbound requests, which "
+            "keeps a residential IP well below quota. Engines rotate "
+            "round-robin, one job per engine at a time; an engine that answers "
+            "429 or a CAPTCHA is quarantined (5 minutes, doubling per "
+            "consecutive failure and capped at 30 minutes) and the query is "
+            "retried on the next active engine. Pinning `engine` to a "
+            "quarantined one is refused immediately rather than retried "
+            "elsewhere.\n\n"
+            "Every job runs under a hard deadline "
+            "(`SEARCH_JOB_DEADLINE_SECONDS`), so a hung upstream call cannot pin "
+            "a worker. If the queue is full, or the workers stop draining, new "
+            "work is refused at once with `503` and a machine-readable reason "
+            "instead of waiting; the breaker admits a single probe afterwards, "
+            "so the service recovers without a restart.\n\n"
             "Successful queries are cached in SQLite for `CACHE_TTL_SECONDS` and "
-            "replayed from cache on a repeat. `force_refresh=true` bypasses the "
-            "cache in both directions: it reads through the engines and does not "
-            "store the result."
+            "replayed from cache on a repeat. Cached answers are never refused. "
+            "`force_refresh=true` bypasses the cache in both directions: it "
+            "reads through the engines and does not store the result."
         ),
         response_model=SearchResponse,
         responses={
@@ -266,17 +334,47 @@ def create_app(
             422: {"model": ErrorResponse, "description": "Invalid query parameters."},
             503: {
                 "model": ErrorResponse,
-                "description": "Every search engine is currently quarantined.",
+                "description": "Cannot serve this search now: every engine "
+                "quarantined, the pinned engine quarantined, the queue saturated, "
+                "or the search path refusing work while it recovers. Always "
+                "carries `Retry-After`.",
                 "content": {
                     "application/json": {
-                        "example": {
-                            "error": "all_engines_quarantined",
-                            "detail": "every search engine is under quarantine; try again later",
+                        "examples": {
+                            "allEnginesQuarantined": {
+                                "summary": "No engine left in the pool",
+                                "value": {
+                                    "error": "all_engines_quarantined",
+                                    "detail": "every search engine is under quarantine; try again later",
+                                },
+                            },
+                            "engineQuarantined": {
+                                "summary": "The pinned engine is out",
+                                "value": {
+                                    "error": "engine_quarantined",
+                                    "detail": "engine ddg is quarantined",
+                                    "engine": "ddg",
+                                },
+                            },
+                            "queueSaturated": {
+                                "summary": "Queue full or not draining",
+                                "value": {
+                                    "error": "not_draining",
+                                    "detail": "search path cannot accept work (not_draining); retry shortly",
+                                    "reason": "not_draining",
+                                    "queue_depth": 19,
+                                    "worker_state": "stuck",
+                                },
+                            },
                         }
                     }
                 },
             },
-            504: {"model": ErrorResponse, "description": "The search timed out in the queue."},
+            504: {
+                "model": ErrorResponse,
+                "description": "The job ran (or waited its full turn) and did not "
+                "produce results: the job deadline expired, or the search failed.",
+            },
         },
     )
     async def search(
@@ -285,8 +383,10 @@ def create_app(
         max_results: int = Query(10, ge=1, le=50, description="Max organic results to yield"),
         engine: str | None = Query(
             None,
-            description="Preferred engine. Ignored (and another engine used) if the "
-            "requested one is quarantined.",
+            description="Engine to use. If it is quarantined the request is refused "
+            "with 503 immediately - it is never silently replaced by another engine, "
+            "because a caller that pinned it needs a `site:` answer, not a "
+            "different one.",
             examples=["google"],
         ),
         force_refresh: bool = Query(
@@ -328,25 +428,60 @@ def create_app(
                 max_results=max_results,
                 requested_engine=engine,
                 force_refresh=force_refresh,
+                # Best effort: stops an abandoned request from occupying a
+                # worker. The per-job deadline is the guarantee, not this.
+                disconnect_check=request.is_disconnected,
             )
         except AllEnginesQuarantinedError:
             return JSONResponse(
                 status_code=503,
+                headers={"Retry-After": "30"},
                 content={
                     "error": "all_engines_quarantined",
                     "detail": "every search engine is under quarantine; try again later",
                 },
             )
-        except SearchQueueFullError as exc:
+        except EngineQuarantinedError as exc:
+            # Pinned to an engine that is out: it can never answer, so this is
+            # "not now" rather than a per-job failure.
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "30"},
+                content={
+                    "error": "engine_quarantined",
+                    "detail": f"engine {exc.engine} is quarantined",
+                    "engine": exc.engine,
+                },
+            )
+        except SearchUnavailableError as exc:
+            # Breaker open, queue saturated, or a worker that would not drain.
+            # Machine-readable, and fast by construction: this is the path that
+            # replaces a 120-second wait.
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": str(exc.retry_after)},
+                content={
+                    "error": exc.reason,
+                    "detail": exc.detail,
+                    "reason": exc.reason,
+                    "queue_depth": exc.queue_depth,
+                    "worker_state": exc.worker_state,
+                },
+            )
+        except (SearchJobFailedError, TimeoutError) as exc:
+            # The job ran (or waited its full turn) and did not produce results.
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except ClientDisconnectedError as exc:
+            # The caller is gone; it will not read this, but a 503 keeps the
+            # client's contract honest (back off and defer) if it did.
             return JSONResponse(
                 status_code=503,
                 headers={"Retry-After": "5"},
-                content={"error": "queue_full", "detail": str(exc)},
+                content={
+                    "error": "client_disconnected",
+                    "detail": str(exc),
+                },
             )
-        except TimeoutError as exc:
-            raise HTTPException(
-                status_code=504, detail="search timed out in the queue"
-            ) from exc
         return response
 
     @app.get(
@@ -354,10 +489,11 @@ def create_app(
         tags=["status"],
         summary="Engine, queue and cache metrics",
         description=(
-            "Operational counters: how deep the search queue is, how many queries "
-            "are cached, the per-engine circuit-breaker state (failure counts, "
-            "quarantine level and remaining cooldown) and lifetime request "
-            "counters."
+            "Operational counters: how deep the search queue is, the state of the "
+            "search workers and the load breaker, how many queries are cached, "
+            "the per-engine circuit-breaker state (failure counts, failure "
+            "class, quarantine level and remaining cooldown) and lifetime "
+            "request counters."
         ),
         responses={
             200: {
@@ -373,6 +509,21 @@ def create_app(
                                 "cache_misses": 32,
                                 "circuit_breaker_trips": 2,
                                 "requests_enqueued": 32,
+                                "jobs_deadline_killed": 0,
+                                "breaker_rejections": 0,
+                                "worker_restarts": 0,
+                            },
+                            "worker": {
+                                "pid": 1234,
+                                "state": "idle",
+                                "current_job_age_s": 0.0,
+                                "jobs_completed": 32,
+                                "pool_size": 2,
+                            },
+                            "breaker": {
+                                "state": "closed",
+                                "reason": None,
+                                "consecutive_failures": 0,
                             },
                             "engines": {
                                 "google": {
@@ -381,6 +532,7 @@ def create_app(
                                     "success_count": 12,
                                     "total_requests": 12,
                                     "quarantine_level": 0,
+                                    "last_failure_class": None,
                                     "quarantined_until": None,
                                     "remaining_cooldown_seconds": 0,
                                 }
@@ -400,6 +552,8 @@ def create_app(
             "queue_depth": service.queue_depth,
             "cached_queries_count": await cache.count(),
             "metrics": service.metrics.to_dict(),
+            "worker": service.worker_status(),
+            "breaker": service.breaker_status(),
             "engines": engines,
         }
 

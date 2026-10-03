@@ -8,6 +8,7 @@ without touching a real browser or the network.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -156,7 +157,14 @@ def test_health_endpoint(client: TestClient) -> None:
 def test_status_endpoint_shape(client: TestClient) -> None:
     client.get("/search", params={"q": "state probe"})
     body = client.get("/status").json()
-    assert set(body) == {"queue_depth", "cached_queries_count", "metrics", "engines"}
+    assert set(body) == {
+        "queue_depth",
+        "cached_queries_count",
+        "metrics",
+        "worker",
+        "breaker",
+        "engines",
+    }
     assert set(body["engines"]) == {"google", "bing", "ddg", "mojeek"}
     assert body["metrics"]["searches_served"] >= 1
     assert body["cached_queries_count"] == 1
@@ -167,6 +175,21 @@ def test_root_metadata(client: TestClient) -> None:
     assert body["service"] == "Muninn API Gateway"
     assert "/search" in body["endpoints"]
 
+
+def test_status_reports_worker_and_breaker(client: TestClient) -> None:
+    """The wedge looked healthy everywhere else, so /status carries the worker
+    identity and the breaker state."""
+    client.get("/search", params={"q": "worker probe"})
+    body = client.get("/status").json()
+    worker = body["worker"]
+    assert worker["pid"] == os.getpid()
+    assert worker["state"] in {"idle", "busy", "stuck", "dead"}
+    assert worker["pool_size"] >= 1
+    assert worker["jobs_completed"] >= 1
+    assert worker["jobs_killed"] == 0
+    assert body["breaker"]["state"] == "closed"
+    assert body["breaker"]["consecutive_failures"] == 0
+
 def test_health_live_is_cheap_and_ok(client) -> None:
     """The container healthcheck endpoint: no DB query, no worker probe."""
     r = client.get("/health/live")
@@ -176,6 +199,12 @@ def test_health_live_is_cheap_and_ok(client) -> None:
     assert "queue_depth" in body
     # The deep report must NOT be inlined here - that is the point of the split.
     assert "browser_pool" not in body
+    # ...but the search worker is, because a wedged queue used to be invisible.
+    assert body["worker"]["pid"] == os.getpid()
+    assert body["worker"]["state"] in {"idle", "busy", "stuck", "dead"}
+    assert body["worker"]["current_job_age_s"] >= 0
+    assert "jobs_completed" in body["worker"]
+    assert body["breaker"]["state"] == "closed"
 
 
 def test_health_ready_reflects_engine_availability(client) -> None:
@@ -184,6 +213,34 @@ def test_health_ready_reflects_engine_availability(client) -> None:
     body = r.json()
     assert body["ready"] is True
     assert "google" in body["active_engines"]
+    # Reported, not enforced: readiness must not follow the breaker, or the
+    # instance would be pulled out of rotation and never get its probe back.
+    assert body["breaker"]["state"] == "closed"
+
+
+def test_pinned_quarantined_engine_is_refused_immediately(
+    client: TestClient, fake_driver: FakeDriver
+) -> None:
+    """A pinned engine that is out can never answer: say so at once (P1).
+
+    Silently rotating to another engine would be worse than useless for a client
+    pinning `engine=ddg` for a `site:` query.
+    """
+    fake_driver.block_engines = {"ddg"}
+    for i in range(4):
+        client.get("/search", params={"q": f"quarantine ddg {i}"})
+    status = client.get("/status").json()["engines"]
+    assert status["ddg"]["status"] == "quarantined"
+    # ddg recovers; the other engines were never in trouble.
+    fake_driver.block_engines = set()
+    calls = fake_driver.url_count
+    resp = client.get("/search", params={"q": "site:example.com", "engine": "ddg"})
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "engine_quarantined"
+    assert resp.json()["engine"] == "ddg"
+    assert resp.headers["Retry-After"]
+    # Refused, not queued: no outbound request was made for it.
+    assert fake_driver.url_count == calls
 
 
 def test_health_reports_scrape_cache_and_rate_limiter(client) -> None:
@@ -238,7 +295,13 @@ def test_swagger_ui_is_served_by_default(client) -> None:
 
 def test_docs_can_be_disabled() -> None:
     """DOCS_ENABLED=0 must remove the schema entirely, for exposed deployments."""
-    app = create_app(settings=make_test_settings(docs_enabled=False))
+    # The fake driver keeps this hermetic: without it the default factory builds
+    # a real BrowserDriver and the test needs a downloaded Chromium, which is
+    # exactly the "no test launches a browser" property the suite claims.
+    app = create_app(
+        settings=make_test_settings(docs_enabled=False),
+        driver_factory=lambda s: FakeDriver(),
+    )
     with TestClient(app) as c:
         for path in ("/docs", "/redoc", "/openapi.json"):
             assert c.get(path).status_code == 404, f"{path} should be disabled"

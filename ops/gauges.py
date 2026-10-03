@@ -16,6 +16,8 @@ import logging
 
 from fastapi import Request
 
+from app.search_breaker import GAUGE_VALUES
+from app.search_service import WORKER_GAUGE_VALUES
 from ops.metrics import Registry
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,21 @@ async def refresh_gauges(request: Request) -> None:
 
     try:
         # In-process values: free.
-        registry.set_gauge("muninn_search_queue_depth", app.state.service.queue_depth)
+        service = app.state.service
+        registry.set_gauge("muninn_search_queue_depth", service.queue_depth)
+        # Worker liveness and the breaker. The wedge this describes looked
+        # healthy from every other angle - /health answered in 80ms while the
+        # queue never drained - so these are the numbers that would have shown
+        # it: a worker stuck on one job, and a breaker that had given up.
+        registry.set_gauge(
+            "muninn_search_worker_state", WORKER_GAUGE_VALUES[service.worker_state()]
+        )
+        registry.set_gauge("muninn_search_workers", service.worker_status()["pool_size"])
+        breaker = service.breaker_status()
+        registry.set_gauge(
+            "muninn_search_breaker_state", GAUGE_VALUES[str(breaker["state"])]
+        )
+        registry.set_gauge("muninn_search_queue_stuck", 1 if service.queue_stuck else 0)
         registry.set_gauge(
             "muninn_scrape_cache_entries", app.state.scrape_cache.size()
         )

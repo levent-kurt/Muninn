@@ -39,9 +39,13 @@ class Settings:
     throttle_max_delay: float = field(default_factory=lambda: _env_float("THROTTLE_MAX_DELAY", 30.0))
 
     # --- Circuit breaker / quarantine --------------------------------------
-    # 1st CAPTCHA/429 detection -> 30 minutes; repeat after cooldown -> 12 hours.
-    quarantine_first_seconds: int = field(default_factory=lambda: _env_int("QUARANTINE_FIRST_SECONDS", 1_800))
-    quarantine_escalated_seconds: int = field(default_factory=lambda: _env_int("QUARANTINE_ESCALATED_SECONDS", 43_200))
+    # Cooldowns are exponential per consecutive failure and *capped*:
+    # QUARANTINE_FIRST_SECONDS is the base (scaled down for weaker failure
+    # classes, see engine_manager.FAILURE_CLASS_WEIGHTS) and
+    # QUARANTINE_ESCALATED_SECONDS is the ceiling. A 12h ceiling could take the
+    # pool from four engines to one; 30m re-probes often and keeps capacity.
+    quarantine_first_seconds: int = field(default_factory=lambda: _env_int("QUARANTINE_FIRST_SECONDS", 300))
+    quarantine_escalated_seconds: int = field(default_factory=lambda: _env_int("QUARANTINE_ESCALATED_SECONDS", 1_800))
 
     # --- Caching ------------------------------------------------------------
     # TTL for identical-query responses (24-48h default, spec section 2.2).
@@ -59,6 +63,54 @@ class Settings:
     # Per-client budget for /search (abuse protection, not authentication).
     search_rate_limit_per_minute: int = field(
         default_factory=lambda: _env_int("SEARCH_RATE_LIMIT_PER_MINUTE", 30)
+    )
+
+    # --- Search job execution (P0: the worker must always be released) ------
+    # Hard deadline for ONE search job: throttle wait, every engine attempt and
+    # any retry inside it. On expiry the job is aborted, the engine that was in
+    # flight is charged one failure, and the worker moves on. This is the
+    # guarantee that a hung upstream call cannot pin the worker forever - the
+    # P0 fix for the wedge where /health stayed fast while /search never
+    # returned. Keep it well under REQUEST_TIMEOUT_SECONDS so a job finishes
+    # (or dies) before the caller gives up on it.
+    search_job_deadline_seconds: float = field(
+        default_factory=lambda: _env_float("SEARCH_JOB_DEADLINE_SECONDS", 45.0)
+    )
+    # Workers draining the queue. More than one isolates a hanging engine: it
+    # can only occupy one worker, so the healthy engines keep serving.
+    search_worker_count: int = field(default_factory=lambda: _env_int("SEARCH_WORKER_COUNT", 2))
+    # Max jobs allowed against a single engine at a time.
+    search_max_concurrent_per_engine: int = field(
+        default_factory=lambda: _env_int("SEARCH_MAX_CONCURRENT_PER_ENGINE", 1)
+    )
+    # Grace over the job deadline before a still-busy worker is called stuck.
+    search_worker_stall_grace_seconds: float = field(
+        default_factory=lambda: _env_float("SEARCH_WORKER_STALL_GRACE_SECONDS", 30.0)
+    )
+
+    # --- Search load breaker (P0: refuse fast, recover on a probe) ---------
+    # Consecutive failures (deadline kills, a worker that will not drain, a
+    # dead worker) before the breaker starts refusing new search work.
+    search_breaker_failure_threshold: int = field(
+        default_factory=lambda: _env_int("SEARCH_BREAKER_FAILURE_THRESHOLD", 3)
+    )
+    # A non-empty queue with no job completed for this long is "not draining".
+    # Must exceed the job deadline plus one throttle window, or a legitimately
+    # slow queue would trip the breaker.
+    search_breaker_stall_seconds: float = field(
+        default_factory=lambda: _env_float("SEARCH_BREAKER_STALL_SECONDS", 120.0)
+    )
+    # How often the supervisor samples the queue and the workers.
+    search_monitor_interval_seconds: float = field(
+        default_factory=lambda: _env_float("SEARCH_MONITOR_INTERVAL_SECONDS", 5.0)
+    )
+    # How long the breaker refuses everything before admitting one probe, and
+    # the ceiling it doubles towards on each failed probe round.
+    search_breaker_open_seconds: float = field(
+        default_factory=lambda: _env_float("SEARCH_BREAKER_OPEN_SECONDS", 30.0)
+    )
+    search_breaker_max_open_seconds: float = field(
+        default_factory=lambda: _env_float("SEARCH_BREAKER_MAX_OPEN_SECONDS", 300.0)
     )
 
     # --- Browser driver -----------------------------------------------------
